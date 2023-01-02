@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
-	"fmt"
+	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg"
@@ -12,8 +12,10 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/darwayne/errutil"
+	"log"
 	"math"
 	"strings"
+	"time"
 )
 
 type SimpleXpubSender struct {
@@ -37,25 +39,47 @@ func NewSimpleXpubSender(mngr *TransactionManager, wif *btcutil.WIF, monitorAddr
 
 func (s SimpleXpubSender) Monitor(ctx context.Context) error {
 	if err := s.SendAllFunds(); err != nil {
-		return err
+		log.Println(err)
 	}
 	channel := s.mngr.Subscribe()
-	for transaction := range channel {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
 
-	loop:
-		for _, in := range transaction.Vout {
-			for _, addr := range in.ScriptPubKey.Addresses {
-				if addr == s.address {
-					if err := s.SendAllFunds(); err != nil {
-						return err
-					}
-					break loop
+	duration := 10 * time.Minute
+	t := time.NewTicker(duration)
+	lastRan := time.Now()
+	for {
+		select {
+		case <-t.C:
+			if time.Since(lastRan) >= time.Duration(float64(duration)*.9) {
+				if err := s.SendAllFunds(); err != nil {
+					log.Println(err)
 				}
+			}
+		case transaction := <-channel:
+			s.handleTransaction(ctx, transaction)
+			lastRan = time.Now()
+		}
+	}
+
+	return nil
+}
+
+func (s SimpleXpubSender) handleTransaction(ctx context.Context, transaction *btcjson.TxRawResult) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+loop:
+	for _, in := range transaction.Vout {
+		for _, addr := range in.ScriptPubKey.Addresses {
+			if addr == s.address {
+				if err := s.SendAllFunds(); err != nil {
+					log.Println(err)
+					//time.Sleep(time.Second)
+					//return err
+				}
+				break loop
 			}
 		}
 	}
@@ -100,7 +124,7 @@ func (s SimpleXpubSender) SendAllFunds() (e error) {
 	}
 	amount := s.sourceValue()
 	if amount == 0 {
-		fmt.Println("nothing to send .. skipping send")
+		log.Println("nothing to send .. skipping send")
 		// nothing to send
 		return nil
 	}
@@ -110,10 +134,17 @@ func (s SimpleXpubSender) SendAllFunds() (e error) {
 		s.address: s.wif,
 	}, s.mngr.Params)
 
+	fees, err := s.mngr.EstimateFee(2)
+	if err != nil {
+		return err
+	}
+
+	var size int64
+onceMore:
 	tx := wire.NewMsgTx(wire.TxVersion)
 	for _, utxo := range utxos {
 		in := wire.NewTxIn(&utxo.Outpoint, nil, nil)
-		in.Sequence = 0xffffffff
+		//in.Sequence = 0xffffffff - 1
 
 		tx.AddTxIn(in)
 	}
@@ -127,17 +158,13 @@ func (s SimpleXpubSender) SendAllFunds() (e error) {
 
 	outputScript := s.payToAddrScript(destAddr)
 
-	fees, err := s.mngr.EstimateFee(4)
-	if err != nil {
-		return err
-	}
 	sats, err := btcutil.NewAmount(fees)
 	if err != nil {
 		return err
 	}
-	fee := int64(float64(sats) / 1024 * float64(tx.SerializeSize()+(len(outputScript)*10)))
+	fee := int64(math.Ceil(float64(sats) / 1000 * float64(size) * 1.1))
 	if fee > int64(amount) {
-		fmt.Println("not enough to spend", amount, ".. skipping send", "fee:", fee)
+		log.Println("not enough to spend", amount, ".. skipping send", "fee:", fee)
 		// not enough to spend
 		return nil
 	}
@@ -152,18 +179,30 @@ func (s SimpleXpubSender) SendAllFunds() (e error) {
 		return err
 	}
 
+	if size == 0 {
+		size = int64(tx.SerializeSize())
+		goto onceMore
+	}
+
 	var signedTx bytes.Buffer
 	tx.Serialize(&signedTx)
 
 	hexSignedTx := hex.EncodeToString(signedTx.Bytes())
-	fmt.Println(hexSignedTx)
-
+	log.Println("===")
+	log.Println("sending transaction:", hexSignedTx)
+	log.Println("size:", tx.SerializeSize())
+	log.Println("fee:", fee)
+	log.Println("===")
 	result, err := s.mngr.SendRawTransaction(tx, false)
 	if err != nil {
 		return err
 	}
-	fmt.Println("transaction sent:", result, "fee:", btcutil.Amount(fee), "addr:", destAddr)
-
+	log.Println("===")
+	log.Println("transaction sent:", result,
+		"\namount:", amount-btcutil.Amount(fee),
+		"\nsource:", s.address,
+		"\nsent to:", destAddr)
+	log.Println("===")
 	return nil
 
 }

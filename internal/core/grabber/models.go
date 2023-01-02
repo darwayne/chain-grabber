@@ -17,6 +17,13 @@ import (
 	"time"
 )
 
+func IsDataNotFoundErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "No information")
+}
+
 func DefaultManager() (*TransactionManager, error) {
 	var err error
 	var cli *rpcclient.Client
@@ -194,10 +201,7 @@ func (t *TransactionManager) GetAddressValue(myAddress string) (btcutil.Amount, 
 		return 0, nil, err
 	}
 	var sent, received, unconfirmed btcutil.Amount
-	for idx, transaction := range transactions {
-		if idx == 99 {
-			fmt.Println()
-		}
+	for _, transaction := range transactions {
 		data, _ := hex.DecodeString(transaction.Hex)
 		buf := bytes.NewBuffer(data)
 		actualTransaction, _ := btcutil.NewTxFromReader(buf)

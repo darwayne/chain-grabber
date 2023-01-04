@@ -19,7 +19,7 @@ func main() {
 		"91izeJtyQ1DNGkiRtMGRKBEKYQTX46Ug8mGtKWpX9mDKqArsLpH",
 	}
 
-	sender, err := grabber.NewXpubRangeSender(mngr, [2]uint32{0, 5_000_000}, xpub, []uint32{0}, knownPrivateKeys...)
+	sender, err := grabber.NewXpubRangeSender(mngr, [2]uint32{0, 50_000}, xpub, []uint32{0}, knownPrivateKeys...)
 	if err != nil {
 		panic(err)
 	}

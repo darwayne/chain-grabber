@@ -5,12 +5,17 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/mempool"
 	"github.com/btcsuite/btcd/rpcclient"
+	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/go-zeromq/zmq4"
+	"log"
 	"sort"
 	"strings"
 	"sync"
@@ -22,6 +27,72 @@ func IsDataNotFoundErr(err error) bool {
 		return false
 	}
 	return strings.Contains(err.Error(), "No information")
+}
+
+func MainNetManager() (*TransactionManager, error) {
+	cli, err := rpcclient.New(&rpcclient.ConnConfig{
+		Host:         "10.0.0.30:8332",
+		Endpoint:     "",
+		User:         "bitcoin",
+		Pass:         "bitcoin1@#44#@1",
+		HTTPPostMode: true,
+		DisableTLS:   true,
+	}, &rpcclient.NotificationHandlers{})
+	if err != nil {
+		return nil, err
+	}
+	mngr := NewTransactionManager(cli)
+	mngr.Params = &chaincfg.MainNetParams
+
+	go func() {
+		sock := zmq4.NewSub(context.Background())
+		defer sock.Close()
+		err := sock.Dial("tcp://10.0.0.30:29000")
+		if err != nil {
+			log.Printf("error dialing: %+v\n", err)
+			return
+		}
+		if err := sock.SetOption(zmq4.OptionSubscribe, "rawtx"); err != nil {
+			log.Printf("error setting options: %+v\n", err)
+			return
+		}
+
+		for {
+			msg, err := sock.Recv()
+			if err != nil {
+				log.Printf("error receiving zeromq message: %+v\n", err)
+				return
+			}
+			if len(msg.Frames) == 3 && bytes.Equal(msg.Frames[0], []byte("rawtx")) {
+				go func() {
+					tx, err := btcutil.NewTxFromBytes(msg.Frames[1])
+					if err != nil {
+						log.Printf("error decoding transaction: %+v\n", err)
+						return
+					}
+					converted, err := CreateTxRawResult(mngr.Params, tx.MsgTx(), tx.Hash().String(), nil,
+						"", 0, 0)
+					if err != nil {
+						log.Printf("error converting transaction: %+v\n", err)
+						return
+					}
+
+					mngr.listenersMu.RLock()
+					defer mngr.listenersMu.RUnlock()
+					for _, channel := range mngr.listeners {
+						select {
+						case channel <- converted:
+						}
+					}
+				}()
+
+			}
+
+		}
+	}()
+
+	return mngr, nil
+
 }
 
 func DefaultManager() (*TransactionManager, error) {
@@ -275,7 +346,7 @@ func (t *TransactionManager) StreamTransactions(ctx context.Context, btcAddress 
 	}
 	go func() {
 		defer close(result)
-		add, err := btcutil.DecodeAddress(btcAddress, &chaincfg.TestNet3Params)
+		add, err := btcutil.DecodeAddress(btcAddress, t.Params)
 		if err != nil {
 			sendMsg(TxStream{Err: err})
 			return
@@ -310,7 +381,7 @@ func (t *TransactionManager) StreamTransactions(ctx context.Context, btcAddress 
 }
 
 func (t *TransactionManager) AllTransactionsForAddress(btcAddress string) ([]*btcjson.SearchRawTransactionsResult, error) {
-	add, err := btcutil.DecodeAddress(btcAddress, &chaincfg.TestNet3Params)
+	add, err := btcutil.DecodeAddress(btcAddress, t.Params)
 	if err != nil {
 		return nil, err
 	}
@@ -379,4 +450,157 @@ func (t *TransactionManager) GetTransactionFromStr(transactionID string) *wire.M
 	}
 
 	return result.MsgTx()
+}
+
+func CreateTxRawResult(chainParams *chaincfg.Params, mtx *wire.MsgTx,
+	txHash string, blkHeader *wire.BlockHeader, blkHash string,
+	blkHeight int32, chainHeight int32) (*btcjson.TxRawResult, error) {
+
+	mtxHex, err := messageToHex(mtx)
+	if err != nil {
+		return nil, err
+	}
+
+	txReply := &btcjson.TxRawResult{
+		Hex:      mtxHex,
+		Txid:     txHash,
+		Hash:     mtx.WitnessHash().String(),
+		Size:     int32(mtx.SerializeSize()),
+		Vsize:    int32(mempool.GetTxVirtualSize(btcutil.NewTx(mtx))),
+		Weight:   int32(blockchain.GetTransactionWeight(btcutil.NewTx(mtx))),
+		Vin:      createVinList(mtx),
+		Vout:     createVoutList(mtx, chainParams, nil),
+		Version:  uint32(mtx.Version),
+		LockTime: mtx.LockTime,
+	}
+
+	if blkHeader != nil {
+		// This is not a typo, they are identical in bitcoind as well.
+		txReply.Time = blkHeader.Timestamp.Unix()
+		txReply.Blocktime = blkHeader.Timestamp.Unix()
+		txReply.BlockHash = blkHash
+		txReply.Confirmations = uint64(1 + chainHeight - blkHeight)
+	}
+
+	return txReply, nil
+}
+
+// createVinList returns a slice of JSON objects for the inputs of the passed
+// transaction.
+func createVinList(mtx *wire.MsgTx) []btcjson.Vin {
+	// Coinbase transactions only have a single txin by definition.
+	vinList := make([]btcjson.Vin, len(mtx.TxIn))
+	if blockchain.IsCoinBaseTx(mtx) {
+		txIn := mtx.TxIn[0]
+		vinList[0].Coinbase = hex.EncodeToString(txIn.SignatureScript)
+		vinList[0].Sequence = txIn.Sequence
+		vinList[0].Witness = witnessToHex(txIn.Witness)
+		return vinList
+	}
+
+	for i, txIn := range mtx.TxIn {
+		// The disassembled string will contain [error] inline
+		// if the script doesn't fully parse, so ignore the
+		// error here.
+		disbuf, _ := txscript.DisasmString(txIn.SignatureScript)
+
+		vinEntry := &vinList[i]
+		vinEntry.Txid = txIn.PreviousOutPoint.Hash.String()
+		vinEntry.Vout = txIn.PreviousOutPoint.Index
+		vinEntry.Sequence = txIn.Sequence
+		vinEntry.ScriptSig = &btcjson.ScriptSig{
+			Asm: disbuf,
+			Hex: hex.EncodeToString(txIn.SignatureScript),
+		}
+
+		if mtx.HasWitness() {
+			vinEntry.Witness = witnessToHex(txIn.Witness)
+		}
+	}
+
+	return vinList
+}
+
+// createVoutList returns a slice of JSON objects for the outputs of the passed
+// transaction.
+func createVoutList(mtx *wire.MsgTx, chainParams *chaincfg.Params, filterAddrMap map[string]struct{}) []btcjson.Vout {
+	voutList := make([]btcjson.Vout, 0, len(mtx.TxOut))
+	for i, v := range mtx.TxOut {
+		// The disassembled string will contain [error] inline if the
+		// script doesn't fully parse, so ignore the error here.
+		disbuf, _ := txscript.DisasmString(v.PkScript)
+
+		// Ignore the error here since an error means the script
+		// couldn't parse and there is no additional information about
+		// it anyways.
+		scriptClass, addrs, reqSigs, _ := txscript.ExtractPkScriptAddrs(
+			v.PkScript, chainParams)
+
+		// Encode the addresses while checking if the address passes the
+		// filter when needed.
+		passesFilter := len(filterAddrMap) == 0
+		encodedAddrs := make([]string, len(addrs))
+		for j, addr := range addrs {
+			encodedAddr := addr.EncodeAddress()
+			encodedAddrs[j] = encodedAddr
+
+			// No need to check the map again if the filter already
+			// passes.
+			if passesFilter {
+				continue
+			}
+			if _, exists := filterAddrMap[encodedAddr]; exists {
+				passesFilter = true
+			}
+		}
+
+		if !passesFilter {
+			continue
+		}
+
+		var vout btcjson.Vout
+		vout.N = uint32(i)
+		vout.Value = btcutil.Amount(v.Value).ToBTC()
+		vout.ScriptPubKey.Addresses = encodedAddrs
+		vout.ScriptPubKey.Asm = disbuf
+		vout.ScriptPubKey.Hex = hex.EncodeToString(v.PkScript)
+		vout.ScriptPubKey.Type = scriptClass.String()
+		vout.ScriptPubKey.ReqSigs = int32(reqSigs)
+
+		voutList = append(voutList, vout)
+	}
+
+	return voutList
+}
+
+func witnessToHex(witness wire.TxWitness) []string {
+	// Ensure nil is returned when there are no entries versus an empty
+	// slice so it can properly be omitted as necessary.
+	if len(witness) == 0 {
+		return nil
+	}
+
+	result := make([]string, 0, len(witness))
+	for _, wit := range witness {
+		result = append(result, hex.EncodeToString(wit))
+	}
+
+	return result
+}
+
+// messageToHex serializes a message to the wire protocol encoding using the
+// latest protocol version and returns a hex-encoded string of the result.
+func messageToHex(msg wire.Message) (string, error) {
+	const maxProtocolVersion = 70002
+	var buf bytes.Buffer
+	if err := msg.BtcEncode(&buf, maxProtocolVersion, wire.WitnessEncoding); err != nil {
+		context := fmt.Sprintf("Failed to encode msg of type %T", msg)
+		return "", internalRPCError(err.Error(), context)
+	}
+
+	return hex.EncodeToString(buf.Bytes()), nil
+}
+
+func internalRPCError(errStr, _ string) *btcjson.RPCError {
+	return btcjson.NewRPCError(btcjson.ErrRPCInternal.Code, errStr)
 }

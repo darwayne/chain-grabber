@@ -16,6 +16,7 @@ import (
 	"log"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -42,13 +43,13 @@ func NewXpubRangeSender(mngr *TransactionManager, keyRange [2]uint32, xpub strin
 	log.Println("Generating Keys")
 	m := make(map[string]*btcutil.WIF, (int(keyRange[1]-keyRange[0]))+len(additionalWifs)*2)
 	order := make(map[string]float64)
-	for i := keyRange[0]; i < keyRange[1]; i++ {
+	for i := keyRange[0]; i <= keyRange[1] && i >= keyRange[0]; i++ {
 		var mod btcec.ModNScalar
 		num := float64(i)
 		mod.Zero()
 		mod.SetInt(i)
 		key := btcec.PrivKeyFromScalar(&mod)
-		for _, compressed := range []bool{false, true} {
+		for idx, compressed := range []bool{false, true} {
 			num += 0.01
 			addr, err := PrivToPubKeyHash(key, compressed, mngr.Params)
 			if err != nil {
@@ -60,7 +61,28 @@ func NewXpubRangeSender(mngr *TransactionManager, keyRange [2]uint32, xpub strin
 			}
 			m[addr.EncodeAddress()] = wif
 			order[addr.EncodeAddress()] = num
+
+			num += 0.01
+			addr, err = PrivToSegwit(key, compressed, mngr.Params)
+			if err != nil {
+				panic(err)
+			}
+
+			m[addr.EncodeAddress()] = wif
+			order[addr.EncodeAddress()] = num
+
+			if i != 0 && idx == 0 {
+				num += 0.01
+				addr, err = PrivToTaprootPubKey(key, mngr.Params)
+				if err != nil {
+					panic(err)
+				}
+
+				m[addr.EncodeAddress()] = wif
+				order[addr.EncodeAddress()] = num
+			}
 		}
+
 	}
 
 	for idx, encodedWif := range additionalWifs {
@@ -125,11 +147,20 @@ func (s *XpubRangeSender) SpendAll() error {
 		}
 
 		if err := s.SendAllFunds(addr); err != nil {
-			log.Printf("error trying to spend %s: %+v", addr, err)
+			s.logSpendErr(addr, err)
 		}
 	}
 
 	return nil
+}
+
+func (s *XpubRangeSender) logSpendErr(addr string, err error) {
+	if err == nil {
+		return
+	}
+
+	log.Printf("error trying to spend %s(%f): %+v", addr, s.addressOrder[addr], err)
+
 }
 
 func (s *XpubRangeSender) handleTransaction(ctx context.Context, transaction *btcjson.TxRawResult) error {
@@ -147,7 +178,7 @@ func (s *XpubRangeSender) handleTransaction(ctx context.Context, transaction *bt
 			if knownAddress && !handled {
 				handledAddress[addr] = struct{}{}
 				if err := s.SendAllFunds(addr); err != nil {
-					log.Printf("error trying to spend %s: %+v", addr, err)
+					s.logSpendErr(addr, err)
 				}
 			}
 		}
@@ -208,12 +239,12 @@ func (s *XpubRangeSender) SendAllFunds(address string) (e error) {
 	}
 
 	utxos := s.spendableUTXOs(address, amount)
-
 	fees, err := s.mngr.EstimateFee(2)
 	if err != nil {
 		return err
 	}
 
+ignoreSomeInputs:
 	var size int64
 onceMore:
 	tx := wire.NewMsgTx(wire.TxVersion)
@@ -263,16 +294,51 @@ onceMore:
 	tx.Serialize(&signedTx)
 
 	hexSignedTx := hex.EncodeToString(signedTx.Bytes())
-	log.Println("===")
-	log.Println("sending transaction:", hexSignedTx)
-	log.Println("size:", tx.SerializeSize())
-	log.Println("fee:", fee)
-	log.Println("amount:", amount-btcutil.Amount(fee))
-	log.Println("===")
+	logInfo := func() {
+		log.Println("===")
+		log.Println("sending transaction:", hexSignedTx)
+		log.Println("size:", tx.SerializeSize())
+		log.Println("fee:", fee)
+		log.Println("amount:", amount-btcutil.Amount(fee))
+		log.Println("inputs:", len(tx.TxIn))
+		log.Println("===")
+	}
+
 	result, err := s.mngr.SendRawTransaction(tx, false)
 	if err != nil {
+		// if there's an unspendable utxo .. just remove it .. and retry sending without that utxo
+		if er, ok := err.(*btcjson.RPCError); ok && len(tx.TxIn) > 1 {
+			if er.Code == -25 && strings.Contains(er.Message, "failed to validate input") {
+				pieces := strings.Split(er.Message, " ")
+				_ = pieces
+				if len(pieces) > 10 {
+					p := strings.Split(pieces[6], ":")
+					if len(p) == 2 {
+						index, ee := strconv.Atoi(p[1])
+						if ee != nil {
+							return err
+						}
+
+						newUTXO := make([]UTXO, 0, len(utxos)-1)
+						for _, u := range utxos {
+							if u.Outpoint == tx.TxIn[index].PreviousOutPoint {
+								amount -= u.Amount
+								continue
+							}
+							newUTXO = append(newUTXO, u)
+						}
+
+						utxos = newUTXO
+						goto ignoreSomeInputs
+					}
+				}
+			}
+		}
+
+		logInfo()
 		return err
 	}
+	logInfo()
 	log.Println("===")
 	log.Println("transaction sent:", result,
 		"\namount:", amount-btcutil.Amount(fee),
@@ -303,7 +369,7 @@ func (s *XpubRangeSender) sourceValue(address string) btcutil.Amount {
 
 func (s *XpubRangeSender) spendableUTXOs(address string, amount btcutil.Amount) []UTXO {
 	utxos, err := s.mngr.GetSpendableUTXOs(address, amount)
-	if err != nil {
+	if err != nil && !IsDataNotFoundErr(err) {
 		panic(err)
 	}
 

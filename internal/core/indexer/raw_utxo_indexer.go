@@ -4,9 +4,7 @@ import (
 	"bytes"
 	"encoding/gob"
 	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/syndtr/goleveldb/leveldb"
 	"math"
@@ -122,8 +120,6 @@ func (r *RawUTXO) Index() error {
 		return err
 	}
 	defer db.Close()
-
-	params := &chaincfg.MainNetParams
 	it := db.NewIterator(nil, nil)
 	defer it.Release()
 
@@ -191,40 +187,6 @@ func (r *RawUTXO) Index() error {
 
 			amount := btcutil.Amount(DecompressValue(varintDecoded))
 
-			// Third Varint
-			// ------------
-			// b98276a2ec7700cbc2986ff9aed6825920aece14aa6f5382ca5580
-			//             <>
-			//
-			// nSize - byte to indicate the type or size of script - helps with compression of the script data
-			//  - https://github.com/bitcoin/bitcoin/blob/master/src/compressor.cpp
-
-			//  0  = P2PKH <- hash160 public key
-			//  1  = P2SH  <- hash160 script
-			//  2  = P2PK 02publickey <- nsize makes up part of the public key in the actual script
-			//  3  = P2PK 03publickey
-			//  4  = P2PK 04publickey (uncompressed - but has been compressed in to leveldb) y=even
-			//  5  = P2PK 04publickey (uncompressed - but has been compressed in to leveldb) y=odd
-			//  6+ = [size of the upcoming script] (subtract 6 though to get the actual size in bytes, to account for the previous 5 script types already taken)
-			varint, bytesRead = Varint128Read(xor, offset) // start after last varint
-			offset += bytesRead
-			nsize := Varint128Decode(varint) //
-
-			// Move offset back a byte if script type is 2, 3, 4, or 5 (because this forms part of the P2PK public key along with the actual script)
-			if nsize > 1 && nsize < 6 { // either 2, 3, 4, 5
-				offset--
-			}
-
-			// Get the remaining bytes
-			script := xor[offset:]
-			// Decompress the public keys from P2PK scripts that were uncompressed originally. They got compressed just for storage in the database.
-			// Only decompress if the public key was uncompressed and
-			//   * Script field is selected or
-			//   * Address field is selected and p2pk addresses are enabled.
-			if nsize == 4 || nsize == 5 {
-				script = DecompressPublicKey(script)
-			}
-
 			point := wire.OutPoint{
 				Hash:  *h,
 				Index: uint32(idx),
@@ -242,23 +204,6 @@ func (r *RawUTXO) Index() error {
 			err = utxoDB.Put(pointKey, pointValue, nil)
 			if err != nil {
 				return err
-			}
-
-			scriptType, addresses, _, err := txscript.ExtractPkScriptAddrs(script, params)
-
-			if err != nil {
-				//t.Log("couldn't decode script type or address", err.Error(), h.String(), idx, height, amount)
-				continue
-			} else if scriptType == txscript.NonStandardTy {
-				//t.Log("non standard script type .. skipping (unspendable)",
-				//	h.String(), idx, height, amount)
-				continue
-			} else if len(addresses) > 0 {
-				if len(addresses) == 1 {
-
-				}
-
-				//t.Log(h.String(), idx, height, amount, scriptType, addresses)
 			}
 		}
 	}

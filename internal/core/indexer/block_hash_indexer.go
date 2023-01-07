@@ -2,7 +2,9 @@ package indexer
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/darwayne/chain-grabber/internal/core/grabber"
 	"github.com/syndtr/goleveldb/leveldb"
 	"log"
@@ -24,17 +26,64 @@ func NewBlockHash(mngr *grabber.TransactionManager) BlockHash {
 	}
 }
 
-func (b *BlockHash) Index() error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+func (b *BlockHash) dbPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return err
+		return "", err
 	}
 	initial := filepath.Join(home, "btc", "mainnet")
 	hashDB := filepath.Join(initial, "blockhashdb")
-	os.MkdirAll(hashDB, os.ModePerm)
-	db, err := leveldb.OpenFile(hashDB, nil)
+
+	return hashDB, nil
+}
+
+func (b *BlockHash) getDB() (*leveldb.DB, error) {
+	dbPath, err := b.dbPath()
+	if err != nil {
+		return nil, err
+	}
+
+	db, err := leveldb.OpenFile(dbPath, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return db, nil
+}
+
+func (b *BlockHash) HashFromHeight(height int64) (*chainhash.Hash, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	db, err := b.getDB()
+	defer db.Close()
+
+	buf := &bytes.Buffer{}
+	if err := binary.Write(buf, binary.LittleEndian, height); err != nil {
+		return nil, err
+	}
+
+	result, err := db.Get(buf.Bytes(), nil)
+	if err != nil {
+		return nil, err
+	}
+	hash, err := chainhash.NewHash(result)
+	if err != nil {
+		return nil, err
+	}
+
+	return hash, nil
+}
+
+func (b *BlockHash) Index() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	dbPath, err := b.dbPath()
+	if err != nil {
+		return err
+	}
+	os.MkdirAll(dbPath, os.ModePerm)
+	db, err := leveldb.OpenFile(dbPath, nil)
 	if err != nil {
 		return err
 	}
@@ -123,5 +172,91 @@ func (b *BlockHash) Index() error {
 
 	wg.Wait()
 
-	return nil
+	buf.Reset()
+	if err = binary.Write(buf, binary.LittleEndian, num); err != nil {
+		return err
+	}
+	return db.Put([]byte("max-idx"), buf.Bytes(), nil)
+}
+
+func (b *BlockHash) GetMaxCount() (int64, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	db, err := b.getDB()
+	if err != nil {
+		return 0, nil
+	}
+
+	buf := new(bytes.Buffer)
+	val, err := db.Get([]byte("max-idx"), nil)
+	if err != nil {
+		return 0, err
+	}
+	buf.Write(val)
+	var result int64
+	if err := binary.Read(buf, binary.LittleEndian, &result); err != nil {
+		return 0, err
+	}
+
+	return result, nil
+
+}
+
+type BlockHashStream struct {
+	Index int64
+	Hash  chainhash.Hash
+	Err   error
+}
+
+func (b *BlockHash) Iterate(ctx context.Context) chan BlockHashStream {
+	results := make(chan BlockHashStream, 2)
+	if err := b.Index(); err != nil {
+		results <- BlockHashStream{Err: err}
+		return results
+	}
+
+	db, err := b.getDB()
+	defer db.Close()
+
+	total, err := b.mngr.GetBlockCount()
+	if err != nil {
+		results <- BlockHashStream{Err: err}
+		return results
+	}
+
+	go func() {
+		buf := &bytes.Buffer{}
+		for i := int64(0); i <= total; i++ {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+
+			}
+
+			buf.Reset()
+
+			if err := binary.Write(buf, binary.LittleEndian, i); err != nil {
+				results <- BlockHashStream{Err: err}
+				return
+			}
+
+			val, err := db.Get(buf.Bytes(), nil)
+			if err != nil {
+				results <- BlockHashStream{Err: err}
+				return
+			}
+			hash, err := chainhash.NewHash(val)
+			if err != nil {
+				results <- BlockHashStream{Err: err}
+				return
+			}
+			results <- BlockHashStream{
+				Hash:  *hash,
+				Index: i,
+			}
+		}
+	}()
+
+	return results
 }

@@ -3,6 +3,7 @@ package indexer
 import (
 	"bytes"
 	"encoding/gob"
+	"fmt"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
@@ -75,7 +76,16 @@ func (r *RawUTXO) Iter() error {
 		key := iter.Key()
 		val := iter.Value()
 
-		_, _ = key, val
+		var keyW wire.OutPoint
+		var valW UTXOValue
+
+		err1 := gob.NewDecoder(bytes.NewBuffer(key)).Decode(&keyW)
+		err2 := gob.NewDecoder(bytes.NewBuffer(val)).Decode(&valW)
+		_, _ = err1, err2
+
+		fmt.Println(keyW.Hash.String(), valW.Value)
+
+		_, _, _, _ = key, val, keyW, valW
 	}
 
 	return nil

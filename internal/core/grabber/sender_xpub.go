@@ -226,7 +226,7 @@ func (s SimpleXpubSender) sourceValue() btcutil.Amount {
 }
 
 func (s SimpleXpubSender) spendableUTXOs(amount btcutil.Amount) []UTXO {
-	utxos, err := s.mngr.GetSpendableUTXOs(s.address, amount)
+	utxos, err := s.mngr.GetSpendableUTXOs(s.address, WithSpend(amount))
 	if err != nil {
 		panic(err)
 	}

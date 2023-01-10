@@ -199,7 +199,15 @@ type UTXO struct {
 	RawTransaction *btcjson.SearchRawTransactionsResult
 }
 
-func (t *TransactionManager) GetSpendableUTXOs(myAddress string, spend btcutil.Amount) ([]UTXO, error) {
+type GetSpendableUTXOsOpts struct {
+	//::builder-gen -with-globals -prefix=With -no-builder
+	Spend                 *btcutil.Amount
+	AddressMap            *AddressMap
+	IgnoreUnknownSpenders *bool
+}
+
+func (t *TransactionManager) GetSpendableUTXOs(myAddress string, opts ...GetSpendableUTXOsOptsFunc) ([]UTXO, error) {
+	conf := ToGetSpendableUTXOsOpts(opts...)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -212,6 +220,7 @@ mainLoop:
 			inner:
 				for _, addr := range prev.Addresses {
 					if addr == myAddress {
+						// TODO: add logic here to ignore unknown spends in mempool
 						spent[tx.PreviousOutPoint] = struct{}{}
 						delete(utxos, tx.PreviousOutPoint)
 						break inner
@@ -246,7 +255,7 @@ mainLoop:
 						for _, utxo := range utxos {
 							available += utxo.Amount
 						}
-						if available >= spend {
+						if conf.HasSpend() && available >= *conf.Spend {
 							break mainLoop
 						}
 					}

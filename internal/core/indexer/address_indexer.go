@@ -7,6 +7,8 @@ import (
 	"context"
 	"encoding/gob"
 	"encoding/json"
+	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/syndtr/goleveldb/leveldb"
 	"io"
 	"log"
@@ -21,6 +23,11 @@ import (
 type AddressIndexAsJsonRecord struct {
 	A string
 	T map[string][2]int
+}
+
+type AddressEntry struct {
+	Value btcutil.Amount
+	UTXOs map[chainhash.Hash][2]int64 // first value is index .. second value is amount
 }
 
 type Address struct {

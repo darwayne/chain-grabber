@@ -10,7 +10,9 @@ require (
 	github.com/btcsuite/btcwallet v0.16.5
 	github.com/btcsuite/btcwallet/wallet/txauthor v1.3.2
 	github.com/btcsuite/btcwallet/walletdb v1.4.0
+	github.com/darwayne/builder-gen v1.6.0
 	github.com/darwayne/errutil v1.7.0
+	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.0.1
 	github.com/go-zeromq/zmq4 v0.15.0
 	github.com/shopspring/decimal v1.3.1
 	github.com/stretchr/testify v1.8.0
@@ -29,7 +31,6 @@ require (
 	github.com/btcsuite/websocket v0.0.0-20150119174127-31079b680792 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/decred/dcrd/crypto/blake256 v1.0.0 // indirect
-	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.0.1 // indirect
 	github.com/decred/dcrd/lru v1.0.0 // indirect
 	github.com/go-zeromq/goczmq/v4 v4.2.2 // indirect
 	github.com/golang/snappy v0.0.4 // indirect
@@ -44,8 +45,11 @@ require (
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	go.etcd.io/bbolt v1.3.5-0.20200615073812-232d8fc87f50 // indirect
 	golang.org/x/crypto v0.0.0-20200622213623-75b288015ac9 // indirect
+	golang.org/x/mod v0.3.0 // indirect
 	golang.org/x/sync v0.0.0-20220601150217-0de741cfad7f // indirect
 	golang.org/x/sys v0.0.0-20220520151302-bc2c85ada10a // indirect
 	golang.org/x/text v0.3.7 // indirect
+	golang.org/x/tools v0.0.0-20210115202250-e0d201561e39 // indirect
+	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

@@ -199,6 +199,17 @@ type UTXO struct {
 	RawTransaction *btcjson.SearchRawTransactionsResult
 }
 
+type UTXOs []UTXO
+
+func (utxos UTXOs) TotalAmount() btcutil.Amount {
+	var total btcutil.Amount
+	for _, u := range utxos {
+		total += u.Amount
+	}
+
+	return total
+}
+
 type GetSpendableUTXOsOpts struct {
 	//::builder-gen -with-globals -prefix=With -no-builder
 	Spend                 *btcutil.Amount
@@ -220,7 +231,23 @@ mainLoop:
 			inner:
 				for _, addr := range prev.Addresses {
 					if addr == myAddress {
-						// TODO: add logic here to ignore unknown spends in mempool
+						if conf.HasIgnoreUnknownSpenders() && *conf.IgnoreUnknownSpenders &&
+							stream.RawTX.Confirmations == 0 && conf.HasAddressMap() {
+							var hasKnownSpender bool
+							for _, out := range stream.RawTX.Vout {
+								for _, a := range out.ScriptPubKey.Addresses {
+									if conf.AddressMap.Has(a) {
+										hasKnownSpender = true
+									}
+								}
+							}
+
+							if !hasKnownSpender {
+								continue mainLoop
+							} else {
+								log.Println("ignoring unknown spender in mempool")
+							}
+						}
 						spent[tx.PreviousOutPoint] = struct{}{}
 						delete(utxos, tx.PreviousOutPoint)
 						break inner
@@ -275,7 +302,14 @@ mainLoop:
 	return results, nil
 }
 
-func (t *TransactionManager) GetAddressValue(myAddress string) (btcutil.Amount, []*btcjson.SearchRawTransactionsResult, error) {
+type GetAddressValueOpts struct {
+	//::builder-gen -with-globals -suffix=ForGetAddressValue -no-builder
+	AddressMap            *AddressMap
+	IgnoreUnknownSpenders *bool
+}
+
+func (t *TransactionManager) GetAddressValue(myAddress string, opts ...GetAddressValueOptsFunc) (btcutil.Amount, []*btcjson.SearchRawTransactionsResult, error) {
+	conf := ToGetAddressValueOpts(opts...)
 	transactions, err := t.AllTransactionsForAddress(myAddress)
 	if err != nil {
 		return 0, nil, err
@@ -310,6 +344,23 @@ func (t *TransactionManager) GetAddressValue(myAddress string) (btcutil.Amount, 
 		myLoop:
 			for _, addr := range out.PrevOut.Addresses {
 				if addr == myAddress {
+					if conf.HasIgnoreUnknownSpenders() && *conf.IgnoreUnknownSpenders &&
+						transaction.Confirmations == 0 && conf.HasAddressMap() {
+						var hasKnownSpender bool
+						for _, o := range transaction.Vout {
+							for _, a := range o.ScriptPubKey.Addresses {
+								if conf.AddressMap.Has(a) {
+									hasKnownSpender = true
+								}
+							}
+						}
+
+						if !hasKnownSpender {
+							break myLoop
+						} else {
+							log.Println("ignoring unknown spender in mempool")
+						}
+					}
 					amt, err := btcutil.NewAmount(out.PrevOut.Value)
 					if err != nil {
 						return 0, nil, err

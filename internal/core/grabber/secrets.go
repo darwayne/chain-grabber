@@ -39,3 +39,31 @@ func (m MemorySecretStore) GetScript(address btcutil.Address) ([]byte, error) {
 func (m MemorySecretStore) ChainParams() *chaincfg.Params {
 	return m.params
 }
+
+type GetKeyFn func(address btcutil.Address) (*btcec.PrivateKey, bool, error)
+type GetScriptFn func(address btcutil.Address) ([]byte, error)
+
+type SecretsProxy struct {
+	chain    *chaincfg.Params
+	getKey   GetKeyFn
+	scriptFn GetScriptFn
+}
+
+func NewSecretsProxy(chain *chaincfg.Params, getKeyFn GetKeyFn, scriptFn GetScriptFn) SecretsProxy {
+	return SecretsProxy{
+		chain:    chain,
+		getKey:   getKeyFn,
+		scriptFn: scriptFn,
+	}
+}
+func (m SecretsProxy) GetKey(address btcutil.Address) (*btcec.PrivateKey, bool, error) {
+	return m.getKey(address)
+}
+
+func (m SecretsProxy) GetScript(address btcutil.Address) ([]byte, error) {
+	return m.scriptFn(address)
+}
+
+func (m SecretsProxy) ChainParams() *chaincfg.Params {
+	return m.chain
+}

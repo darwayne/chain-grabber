@@ -25,11 +25,19 @@ type SimpleXpubSender struct {
 
 	xpub           string
 	derivationPath []uint32
+	addrMap        AddressMap
 }
 
 func NewSimpleXpubSender(mngr *TransactionManager, wif *btcutil.WIF, monitorAddr, xpub string, derivationPath []uint32) SimpleXpubSender {
+	gen, err := NewXPubAddressGenerator(xpub, derivationPath, mngr.Params)
+	var m AddressMap
+	if err == nil {
+		m, _ = gen.AddressRange(0, 50_000)
+
+	}
 	return SimpleXpubSender{
 		mngr:           mngr,
+		addrMap:        m,
 		wif:            wif,
 		address:        monitorAddr,
 		xpub:           xpub,
@@ -226,12 +234,22 @@ func (s SimpleXpubSender) sourceValue() btcutil.Amount {
 }
 
 func (s SimpleXpubSender) spendableUTXOs(amount btcutil.Amount) []UTXO {
-	utxos, err := s.mngr.GetSpendableUTXOs(s.address, WithSpend(amount))
+	args := []GetSpendableUTXOsOptsFunc{
+		WithSpend(amount),
+	}
+	if s.addrMap != nil {
+		args = append(args, WithIgnoreUnknownSpenders(true),
+			WithAddressMap(s.addrMap))
+	}
+
+	utxos, err := s.mngr.GetSpendableUTXOs(s.address,
+		args...)
 	if err != nil {
 		panic(err)
 	}
 
 	return utxos
+
 }
 
 func (s SimpleXpubSender) payToAddrScript(addr btcutil.Address) []byte {

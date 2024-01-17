@@ -36,10 +36,20 @@ type XpubRangeSender struct {
 	derivationPath []uint32
 
 	secretStore MemorySecretStore
+	addrMap     AddressMap
 }
 
 func NewXpubRangeSender(mngr *TransactionManager, keyRange [2]uint32, xpub string, derivationPath []uint32, additionalWifs ...string) (_ XpubRangeSender, e error) {
 	defer errutil.ExpectedPanicAsError(&e)
+	addrGen, err := NewXPubAddressGenerator(xpub, derivationPath, mngr.Params)
+	if err != nil {
+		panic(err)
+	}
+	addrMap, err := addrGen.AddressRange(keyRange[0], keyRange[1])
+	if err != nil {
+		panic(err)
+	}
+
 	log.Println("Generating Keys")
 	m := make(map[string]*btcutil.WIF, (int(keyRange[1]-keyRange[0]))+len(additionalWifs)*2)
 	order := make(map[string]float64)
@@ -87,6 +97,7 @@ func NewXpubRangeSender(mngr *TransactionManager, keyRange [2]uint32, xpub strin
 		addressMap:     m,
 		secretStore:    NewMemorySecretStore(m, mngr.Params),
 		addressOrder:   order,
+		addrMap:        addrMap,
 	}, nil
 }
 
@@ -154,6 +165,7 @@ func (s *XpubRangeSender) handleTransaction(ctx context.Context, transaction *bt
 	return nil
 }
 
+var unconfirmedInputRegex = regexp.MustCompile(`spends new unconfirmed input ([^\s\:]+\:\d+)`)
 var feeRegex = regexp.MustCompile(`has an insufficient .*fee[^\d]+(\d+),`)
 
 func (s *XpubRangeSender) SendAllFunds(address string) (e error) {
@@ -298,10 +310,32 @@ onceMore:
 					goto ignoreSomeInputs
 				}
 
+				if match := unconfirmedInputRegex.FindStringSubmatch(err.Error()); match != nil && len(tx.TxIn) > 1 {
+					p := strings.Split(match[1], ":")
+					if len(p) == 2 {
+						index, ee := strconv.Atoi(p[1])
+						if ee != nil {
+							return err
+						}
+
+						newUTXO := make([]UTXO, 0, len(utxos)-1)
+						for _, u := range utxos {
+							if u.Outpoint == tx.TxIn[index].PreviousOutPoint {
+								amount -= u.Amount
+								continue
+							}
+							newUTXO = append(newUTXO, u)
+						}
+
+						utxos = newUTXO
+						goto ignoreSomeInputs
+					}
+				}
+
 			}
 
 			// if there's an unspendable utxo .. just remove it .. and retry sending without that utxo
-			if er.Code == -25 && strings.Contains(er.Message, "failed to validate input") {
+			if er.Code == -25 && strings.Contains(er.Message, "failed to validate input") && len(tx.TxIn) > 1 {
 				pieces := strings.Split(er.Message, " ")
 				_ = pieces
 				if len(pieces) > 10 {
@@ -356,7 +390,12 @@ func (s *XpubRangeSender) decodeAddress(address string) btcutil.Address {
 }
 
 func (s *XpubRangeSender) sourceValue(address string) btcutil.Amount {
-	amount, _, err := s.mngr.GetAddressValue(address)
+	var args []GetAddressValueOptsFunc
+	if s.addrMap != nil {
+		args = append(args, IgnoreUnknownSpendersForGetAddressValue(true),
+			AddressMapForGetAddressValue(s.addrMap))
+	}
+	amount, _, err := s.mngr.GetAddressValue(address, args...)
 	if err != nil && !IsDataNotFoundErr(err) {
 		panic(err)
 	}
@@ -365,8 +404,17 @@ func (s *XpubRangeSender) sourceValue(address string) btcutil.Amount {
 }
 
 func (s *XpubRangeSender) spendableUTXOs(address string, amount btcutil.Amount) []UTXO {
-	utxos, err := s.mngr.GetSpendableUTXOs(address, WithSpend(amount))
-	if err != nil && !IsDataNotFoundErr(err) {
+	args := []GetSpendableUTXOsOptsFunc{
+		WithSpend(amount),
+	}
+	if s.addrMap != nil {
+		args = append(args, WithIgnoreUnknownSpenders(true),
+			WithAddressMap(s.addrMap))
+	}
+
+	utxos, err := s.mngr.GetSpendableUTXOs(address,
+		args...)
+	if err != nil {
 		panic(err)
 	}
 

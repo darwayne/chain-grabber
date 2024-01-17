@@ -21,3 +21,12 @@ func TestFeeRegex(t *testing.T) {
 	})
 
 }
+
+func TestInputRegex(t *testing.T) {
+	t.Run("scenario 1", func(t *testing.T) {
+		msg := "TX rejected: replacement transaction spends new unconfirmed input 5579bbe5a13510b41565c1c0c71864c1daa703299dd654d2ea4d6ddb55340a72:1 not found in conflicting transactions"
+		results := unconfirmedInputRegex.FindStringSubmatch(msg)
+		require.Len(t, results, 2)
+		require.Equal(t, results[1], "5579bbe5a13510b41565c1c0c71864c1daa703299dd654d2ea4d6ddb55340a72:1")
+	})
+}

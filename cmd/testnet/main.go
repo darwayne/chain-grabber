@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"github.com/darwayne/chain-grabber/internal/core/grabber"
 	"os"
 )
@@ -26,6 +27,8 @@ func main() {
 	knownPrivateKeys := []string{
 		"92Pg46rUhgTT7romnV7iGW6W1gbGdeezqdbJCzShkCsYNzyyNcc",
 		"91izeJtyQ1DNGkiRtMGRKBEKYQTX46Ug8mGtKWpX9mDKqArsLpH",
+		"cNTENqF7rLCZvzYDfbQ6skk4A5KTq7qV3hKV7i1Hb6KRnX6MdqWa",
+		"cNV8spCBYY4eu1aVpUZzVMyLyKZ18kDtKVaTyCnMBxKdAxftXwQZ",
 	}
 
 	sender, err := grabber.NewXpubRangeSender(mngr, [2]uint32{0, 50_000}, xpub, []uint32{0}, knownPrivateKeys...)
@@ -33,10 +36,10 @@ func main() {
 		panic(err)
 	}
 
-	//go func() {
-	//	fmt.Println("Attempting to spend all")
-	//	fmt.Println(sender.SpendAll())
-	//}()
+	go func() {
+		fmt.Println("Attempting to spend all")
+		fmt.Println(sender.SpendAll())
+	}()
 	err = sender.Monitor(context.Background())
 	if err != nil {
 		panic(err)

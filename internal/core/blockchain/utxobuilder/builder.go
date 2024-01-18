@@ -6,6 +6,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/darwayne/chain-grabber/internal/core/blockchain"
 	"golang.org/x/sync/errgroup"
+	"log"
 	"sync"
 	"time"
 )
@@ -19,12 +20,14 @@ func NewBuilder(clis []blockchain.Client, store UTXOStore) *Builder {
 }
 
 type Builder struct {
-	clis        []blockchain.Client
-	mu          sync.RWMutex
-	cliIterator int
-	store       UTXOStore
-	blockMu     sync.RWMutex
-	tempBlocks  map[int]*wire.MsgBlock
+	clis          []blockchain.Client
+	mu            sync.RWMutex
+	cliIterator   int
+	heightMu      sync.RWMutex
+	currentHeight int
+	store         UTXOStore
+	blockMu       sync.RWMutex
+	tempBlocks    map[int]*wire.MsgBlock
 }
 
 type UTXOSet struct {
@@ -43,6 +46,9 @@ func (b *Builder) Build() error {
 		return err
 	}
 	fmt.Printf("starting from height: %d\tsize:%d\n", data.StartPoint, len(data.UTXOs))
+	b.currentHeight = data.StartPoint
+
+	go b.poolBlocks(data.StartPoint, maxHeight)
 
 	for i := data.StartPoint; i <= maxHeight; i++ {
 		if err := b.processHeight(i, maxHeight, &data); err != nil {
@@ -54,13 +60,7 @@ func (b *Builder) Build() error {
 }
 
 func (b *Builder) processHeight(height, _ int, data *UTXOSet) error {
-	ctx := context.Background()
-
-	hash, err := b.getClient().GetBlockHashFromHeight(ctx, height)
-	if err != nil {
-		return err
-	}
-	block, err := b.getClient().GetBlock(ctx, *hash)
+	block := b.waitForBlock(height)
 	utxoSet := data.UTXOs
 	for _, tx := range block.Transactions {
 		for _, input := range tx.TxIn {
@@ -72,6 +72,9 @@ func (b *Builder) processHeight(height, _ int, data *UTXOSet) error {
 		}
 	}
 	data.StartPoint = height
+	b.heightMu.Lock()
+	b.currentHeight = height
+	b.heightMu.Unlock()
 	if height%100 == 0 {
 		if err := b.flush(data); err != nil {
 			return err
@@ -105,17 +108,18 @@ func (b *Builder) waitForBlock(height int) *wire.MsgBlock {
 		block, found := b.tempBlocks[height]
 		b.blockMu.RUnlock()
 		if !found {
-			time.Sleep(time.Millisecond)
+			time.Sleep(time.Microsecond)
 		}
 
 		return block
 	}
 }
 
-func (b *Builder) poolBlocks() {
+func (b *Builder) poolBlocks(startingPoint, maxHeight int) {
 	parentCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	group, ctx := errgroup.WithContext(parentCtx)
+	doneChan := make(chan struct{})
 
 	const maxWorkers = 5
 	workChan := make(chan int, 1)
@@ -123,7 +127,7 @@ func (b *Builder) poolBlocks() {
 		group.Go(func() error {
 			for {
 				select {
-				case <-ctx.Done():
+				case <-doneChan:
 					return nil
 				case height := <-workChan:
 					block, err := b.getBlock(ctx, height)
@@ -136,6 +140,28 @@ func (b *Builder) poolBlocks() {
 				}
 			}
 		})
+	}
+
+	for i := startingPoint; i <= maxHeight; i++ {
+		workChan <- i
+		if i%maxWorkers == 0 {
+			b.heightMu.RLock()
+			height := b.currentHeight
+			b.heightMu.RUnlock()
+			b.blockMu.Lock()
+			for key := range b.tempBlocks {
+				if key < height {
+					delete(b.tempBlocks, key)
+				}
+			}
+			b.blockMu.Unlock()
+			time.Sleep(time.Second)
+		}
+	}
+
+	close(doneChan)
+	if err := group.Wait(); err != nil {
+		log.Fatalln("error getting blocks", err)
 	}
 
 }

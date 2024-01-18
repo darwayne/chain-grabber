@@ -2,6 +2,7 @@ package utxobuilder
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/darwayne/chain-grabber/internal/core/blockchain"
@@ -60,7 +61,10 @@ func (b *Builder) Build() error {
 }
 
 func (b *Builder) processHeight(height, _ int, data *UTXOSet) error {
-	block := b.waitForBlock(height)
+	block, err := b.waitForBlock(height)
+	if err != nil {
+		return err
+	}
 	utxoSet := data.UTXOs
 	for _, tx := range block.Transactions {
 		for _, input := range tx.TxIn {
@@ -95,24 +99,33 @@ func (b *Builder) getClient() blockchain.Client {
 }
 
 func (b *Builder) getBlock(ctx context.Context, height int) (*wire.MsgBlock, error) {
-	hash, err := b.getClient().GetBlockHashFromHeight(ctx, height)
+	time.Sleep(10 * time.Millisecond)
+	ctx1, cancel1 := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel1()
+	hash, err := b.getClient().GetBlockHashFromHeight(ctx1, height)
 	if err != nil {
 		return nil, err
 	}
-	return b.getClient().GetBlock(ctx, *hash)
+	ctx2, cancel2 := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel2()
+	return b.getClient().GetBlock(ctx2, *hash)
 }
 
-func (b *Builder) waitForBlock(height int) *wire.MsgBlock {
-	for {
+func (b *Builder) waitForBlock(height int) (*wire.MsgBlock, error) {
+
+	for i := 0; i < 30_000_000; i++ {
 		b.blockMu.RLock()
 		block, found := b.tempBlocks[height]
 		b.blockMu.RUnlock()
 		if !found {
 			time.Sleep(time.Microsecond)
+			continue
 		}
 
-		return block
+		return block, nil
 	}
+
+	return nil, errors.New("took too long to process")
 }
 
 func (b *Builder) poolBlocks(startingPoint, maxHeight int) {
@@ -121,7 +134,7 @@ func (b *Builder) poolBlocks(startingPoint, maxHeight int) {
 	group, ctx := errgroup.WithContext(parentCtx)
 	doneChan := make(chan struct{})
 
-	const maxWorkers = 5
+	const maxWorkers = 11
 	workChan := make(chan int, 1)
 	for i := 0; i < maxWorkers; i++ {
 		group.Go(func() error {
@@ -142,21 +155,33 @@ func (b *Builder) poolBlocks(startingPoint, maxHeight int) {
 		})
 	}
 
+loop:
 	for i := startingPoint; i <= maxHeight; i++ {
-		workChan <- i
-		if i%maxWorkers == 0 {
+		select {
+		case workChan <- i:
+		case <-ctx.Done():
+			break loop
+		}
+		if i%(maxWorkers*30) == 0 {
 			b.heightMu.RLock()
 			height := b.currentHeight
 			b.heightMu.RUnlock()
 			b.blockMu.Lock()
+			x := 0
 			for key := range b.tempBlocks {
 				if key < height {
+					x++
 					delete(b.tempBlocks, key)
 				}
 			}
+			if x > 0 {
+				fmt.Println("pruned", x, "temp blocks")
+			}
+
 			b.blockMu.Unlock()
-			time.Sleep(time.Second)
+			//time.Sleep(100 * time.Millisecond)
 		}
+
 	}
 
 	close(doneChan)

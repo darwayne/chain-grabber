@@ -37,6 +37,19 @@ func getClients() []blockchain.Client {
 		"nyc.socks.ipvanish.com",
 		"phx.socks.ipvanish.com",
 		"sea.socks.ipvanish.com",
+		"tor.socks.ipvanish.com",
+		"syd.socks.ipvanish.com",
+		"par.socks.ipvanish.com",
+		"fra.socks.ipvanish.com",
+		"lin.socks.ipvanish.com",
+		"nrt.socks.ipvanish.com",
+		"ams.socks.ipvanish.com",
+		"waw.socks.ipvanish.com",
+		"lis.socks.ipvanish.com",
+		"sin.socks.ipvanish.com",
+		"mad.socks.ipvanish.com",
+		"sto.socks.ipvanish.com",
+		"lon.socks.ipvanish.com",
 	}
 
 	var clients []blockchain.Client

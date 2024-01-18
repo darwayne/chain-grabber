@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
@@ -55,6 +57,10 @@ func (r *Rest) GetBlockHeight(ctx context.Context) (int, error) {
 		return 0, err
 	}
 
+	if result.StatusCode() != 200 {
+		return 0, errors.New(fmt.Sprintf("unexpected status code: %d", result.StatusCode()))
+	}
+
 	rawNum, err := io.ReadAll(result.RawBody())
 	if err != nil {
 		return 0, err
@@ -72,6 +78,9 @@ func (r *Rest) GetBlock(ctx context.Context, hash chainhash.Hash) (*wire.MsgBloc
 
 	if err != nil {
 		return nil, err
+	}
+	if result.StatusCode() != 200 {
+		return nil, errors.New(fmt.Sprintf("unexpected status code: %d", result.StatusCode()))
 	}
 
 	block := &wire.MsgBlock{}
@@ -95,6 +104,10 @@ func (r *Rest) GetBlockHashFromHeight(ctx context.Context, height int) (*chainha
 		return nil, err
 	}
 
+	if result.StatusCode() != 200 {
+		return nil, errors.New(fmt.Sprintf("unexpected status code: %d", result.StatusCode()))
+	}
+
 	body := result.RawBody()
 	var buf bytes.Buffer
 	if _, err = io.Copy(&buf, body); err != nil {
@@ -116,6 +129,10 @@ func (r *Rest) GetTransaction(ctx context.Context, hash chainhash.Hash) (*wire.M
 		return nil, err
 	}
 
+	if result.StatusCode() != 200 {
+		return nil, errors.New(fmt.Sprintf("unexpected status code: %d", result.StatusCode()))
+	}
+
 	block := &wire.MsgTx{}
 	body := result.RawBody()
 	reader := hex.NewDecoder(body)
@@ -129,13 +146,17 @@ func (r *Rest) GetTransaction(ctx context.Context, hash chainhash.Hash) (*wire.M
 
 func (r *Rest) GetMempoolTransactionIDs(ctx context.Context) ([]chainhash.Hash, error) {
 	var data []chainhash.Hash
-	_, err := r.cli.R().
+	result, err := r.cli.R().
 		SetContext(ctx).
 		SetResult(&data).
 		Get("/mempool/txids")
 
 	if err != nil {
 		return nil, err
+	}
+
+	if result.StatusCode() != 200 {
+		return nil, errors.New(fmt.Sprintf("unexpected status code: %d", result.StatusCode()))
 	}
 
 	return data, nil

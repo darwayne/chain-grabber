@@ -1,1 +1,3 @@
 poc_test.go
+*.gz
+*.sqlite

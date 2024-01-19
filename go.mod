@@ -1,6 +1,6 @@
 module github.com/darwayne/chain-grabber
 
-go 1.19
+go 1.21
 
 require (
 	github.com/btcsuite/btcd v0.24.0
@@ -44,6 +44,7 @@ require (
 	github.com/lightningnetwork/lnd/queue v1.0.1 // indirect
 	github.com/lightningnetwork/lnd/ticker v1.0.0 // indirect
 	github.com/lightningnetwork/lnd/tlv v1.0.2 // indirect
+	github.com/mattn/go-sqlite3 v1.14.19 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	go.etcd.io/bbolt v1.3.5-0.20200615073812-232d8fc87f50 // indirect

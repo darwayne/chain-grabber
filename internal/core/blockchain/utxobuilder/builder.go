@@ -8,6 +8,7 @@ import (
 	"github.com/darwayne/chain-grabber/internal/core/blockchain"
 	"golang.org/x/sync/errgroup"
 	"log"
+	"maps"
 	"sync"
 	"time"
 )
@@ -23,6 +24,7 @@ func NewBuilder(clis []blockchain.Client, store UTXOStore) *Builder {
 type Builder struct {
 	clis          []blockchain.Client
 	mu            sync.RWMutex
+	dataMu        sync.RWMutex
 	cliIterator   int
 	heightMu      sync.RWMutex
 	currentHeight int
@@ -46,7 +48,10 @@ func (b *Builder) Build() error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("starting from height: %d\tsize:%d\n", data.StartPoint, len(data.UTXOs))
+	log.Printf("starting from height: %d\tmax-height: %d\tsize:%d\n",
+		data.StartPoint,
+		maxHeight,
+		len(data.UTXOs))
 	b.currentHeight = data.StartPoint
 
 	go b.poolBlocks(data.StartPoint, maxHeight)
@@ -79,7 +84,7 @@ func (b *Builder) processHeight(height, _ int, data *UTXOSet) error {
 	b.heightMu.Lock()
 	b.currentHeight = height
 	b.heightMu.Unlock()
-	if height%100 == 0 {
+	if height%1000 == 0 {
 		if err := b.flush(data); err != nil {
 			return err
 		}
@@ -98,8 +103,16 @@ func (b *Builder) getClient() blockchain.Client {
 	return b.clis[b.cliIterator]
 }
 
-func (b *Builder) getBlock(ctx context.Context, height int) (*wire.MsgBlock, error) {
-	time.Sleep(10 * time.Millisecond)
+func (b *Builder) getBlock(ctx context.Context, height int) (block *wire.MsgBlock, e error) {
+	defer func() {
+		if e != nil && !(errors.Is(e, context.Canceled)) {
+			fmt.Println("error detected:", e.Error())
+			fmt.Println("backing off for 1 minute")
+			time.Sleep(time.Minute)
+			block, e = b.getBlock(ctx, height)
+		}
+	}()
+	time.Sleep(50 * time.Millisecond)
 	ctx1, cancel1 := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel1()
 	hash, err := b.getClient().GetBlockHashFromHeight(ctx1, height)
@@ -113,7 +126,7 @@ func (b *Builder) getBlock(ctx context.Context, height int) (*wire.MsgBlock, err
 
 func (b *Builder) waitForBlock(height int) (*wire.MsgBlock, error) {
 
-	for i := 0; i < 30_000_000; i++ {
+	for {
 		b.blockMu.RLock()
 		block, found := b.tempBlocks[height]
 		b.blockMu.RUnlock()
@@ -125,7 +138,6 @@ func (b *Builder) waitForBlock(height int) (*wire.MsgBlock, error) {
 		return block, nil
 	}
 
-	return nil, errors.New("took too long to process")
 }
 
 func (b *Builder) poolBlocks(startingPoint, maxHeight int) {
@@ -134,7 +146,7 @@ func (b *Builder) poolBlocks(startingPoint, maxHeight int) {
 	group, ctx := errgroup.WithContext(parentCtx)
 	doneChan := make(chan struct{})
 
-	const maxWorkers = 11
+	const maxWorkers = 5
 	workChan := make(chan int, 1)
 	for i := 0; i < maxWorkers; i++ {
 		group.Go(func() error {
@@ -175,7 +187,7 @@ loop:
 				}
 			}
 			if x > 0 {
-				fmt.Println("pruned", x, "temp blocks")
+				log.Println("pruned", x, "temp blocks", "\tblocks to process:", len(b.tempBlocks))
 			}
 
 			b.blockMu.Unlock()
@@ -193,19 +205,21 @@ loop:
 
 func (b *Builder) flush(data *UTXOSet) error {
 	start := time.Now()
-	fmt.Printf("flushing... height: %d\nutxo size:%d\n",
+	log.Printf("flushing... height: %d\nutxo size:%d\n",
 		data.StartPoint, len(data.UTXOs))
 	defer func() {
 		fmt.Println("flush completed in", time.Since(start))
 	}()
 	copied := UTXOSet{
 		StartPoint: data.StartPoint,
-		UTXOs:      make(map[wire.OutPoint]int64, len(data.UTXOs)),
+		UTXOs:      maps.Clone(data.UTXOs),
 	}
 
-	for k, v := range data.UTXOs {
-		copied.UTXOs[k] = v
-	}
+	go func() {
+		if err := b.store.Put(context.Background(), copied); err != nil {
+			log.Fatalln("error writing", err.Error())
+		}
+	}()
 
-	return b.store.Put(context.Background(), copied)
+	return nil
 }

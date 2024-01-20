@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"sync"
 	"testing"
 	"time"
@@ -5532,11 +5533,23 @@ func TestBlockChairBlocks(t *testing.T) {
 
 	//iterator := ClientIterator{clients: getHttpClients()}
 
-	errGroup, ctx := errgroup.WithContext(context.Background())
+	parentContext, cancel := context.WithCancel(context.Background())
+	go func() {
+		c := make(chan os.Signal, 1)
+		signal.Notify(c, os.Interrupt)
+		for range c {
+			cancel()
+			return
+		}
+	}()
+
+	errGroup, ctx := errgroup.WithContext(parentContext)
+
 	work := make(chan string, 1)
 	clients := getHttpClients()
-	//errGroup.SetLimit(1)
+	errGroup.SetLimit(len(clients))
 	for idx := range clients {
+		proxy := ProxyHosts[idx]
 		client := clients[idx]
 		errGroup.Go(func() (ee error) {
 			defer func() {
@@ -5552,19 +5565,50 @@ func TestBlockChairBlocks(t *testing.T) {
 					if !ok {
 						return nil
 					}
-					err := func() error {
+					filename := "./testdata/blockchairblockdata/" + endpoint
+					err := func() (eee error) {
+						defer func() {
+							if eee != nil {
+								os.Remove(filename)
+								t.Log("bad proxy?", proxy, "error:", eee.Error())
+							}
+						}()
+						f, err := os.Open(filename)
+						if err == nil {
+							data, err := bufio.NewReader(f).Peek(1)
+							if err != nil {
+								return err
+							}
+							if string(data) != "<" {
+								f.Close()
+								t.Log(endpoint, "already saved skipping")
+								return nil
+							} else {
+								t.Log("cleaning up bad file", filename)
+								f.Close()
+								os.Remove(filename)
+							}
+						}
+						time.Sleep(time.Second)
 						cx, cancel := context.WithTimeout(ctx, 10*time.Second)
 						defer cancel()
 						req, err := http.NewRequestWithContext(cx, "GET", base+endpoint, nil)
 						if err != nil {
 							return err
 						}
+						req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/28.0.1468.0 Safari/537.36")
 						resp, err := client.Do(req)
 						if err != nil {
 							return err
 						}
 						defer resp.Body.Close()
-						f, err := os.Create("./testdata/blockchairblockdata/" + endpoint)
+						if resp.StatusCode != 200 {
+							t.Log("bad proxy host", proxy)
+							return errors.New(fmt.Sprintln("got bad status code", resp.StatusCode))
+						}
+						t.Log("success!")
+
+						f, err = os.Create(filename)
 						if err != nil {
 							return err
 						}
@@ -5594,7 +5638,6 @@ loop:
 		//	continue
 		//}
 
-		processed++
 		//if processed <= 1266 {
 		//	continue
 		//}
@@ -5604,8 +5647,9 @@ loop:
 		case <-ctx.Done():
 			break loop
 		}
+		processed++
 
-		fmt.Println(processed)
+		t.Log(processed)
 	}
 	close(work)
 
@@ -11113,11 +11157,22 @@ func TestBlockChairOutputs(t *testing.T) {
 
 	//iterator := ClientIterator{clients: getHttpClients()}
 
-	errGroup, ctx := errgroup.WithContext(context.Background())
+	parentContext, cancel := context.WithCancel(context.Background())
+	go func() {
+		c := make(chan os.Signal, 1)
+		signal.Notify(c, os.Interrupt)
+		for range c {
+			cancel()
+			return
+		}
+	}()
+
+	errGroup, ctx := errgroup.WithContext(parentContext)
 	work := make(chan string)
 	clients := getHttpClients()
 	errGroup.SetLimit(len(clients))
 	for idx := range clients {
+		proxy := ProxyHosts[idx]
 		client := clients[idx]
 		errGroup.Go(func() (ee error) {
 			defer func() {
@@ -11138,6 +11193,7 @@ func TestBlockChairOutputs(t *testing.T) {
 						defer func() {
 							if eee != nil {
 								os.Remove(filename)
+								t.Log("bad proxy?", proxy, "error:", eee.Error())
 							}
 						}()
 						f, err := os.Open(filename)
@@ -11148,29 +11204,32 @@ func TestBlockChairOutputs(t *testing.T) {
 							}
 							if string(data) != "<" {
 								f.Close()
-								fmt.Println(endpoint, "already saved skipping")
+								//t.Log(endpoint, "already saved skipping")
 								return nil
 							} else {
-								fmt.Println("cleaning up bad file", filename)
+								//t.Log("cleaning up bad file", filename)
 								f.Close()
 								os.Remove(filename)
 							}
 						}
-						time.Sleep(time.Second)
-						cx, cancel := context.WithTimeout(ctx, 20*time.Second)
+						time.Sleep(20 * time.Second)
+						cx, cancel := context.WithTimeout(ctx, 10*time.Second)
 						defer cancel()
 						req, err := http.NewRequestWithContext(cx, "GET", base+endpoint, nil)
 						if err != nil {
 							return err
 						}
+						req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/28.0.1468.0 Safari/537.36")
 						resp, err := client.Do(req)
 						if err != nil {
 							return err
 						}
+						defer resp.Body.Close()
 						if resp.StatusCode != 200 {
 							return errors.New(fmt.Sprintln("got bad status code", resp.StatusCode))
 						}
-						defer resp.Body.Close()
+						t.Log("success!", endpoint, proxy)
+
 						f, err = os.Create(filename)
 						if err != nil {
 							return err
@@ -11201,7 +11260,6 @@ loop:
 		//	continue
 		//}
 
-		processed++
 		//if processed <= 750 {
 		//	continue
 		//}
@@ -11211,8 +11269,9 @@ loop:
 		case <-ctx.Done():
 			break loop
 		}
+		processed++
 
-		fmt.Println(processed)
+		//fmt.Println(processed)
 	}
 	close(work)
 
@@ -11222,36 +11281,38 @@ loop:
 	_ = endpoints
 }
 
+var ProxyHosts = []string{
+	"iad.socks.ipvanish.com",
+	"atl.socks.ipvanish.com",
+	"chi.socks.ipvanish.com",
+	"mia.socks.ipvanish.com",
+	"nyc.socks.ipvanish.com",
+	"dal.socks.ipvanish.com",
+	"den.socks.ipvanish.com",
+	"lax.socks.ipvanish.com",
+	"phx.socks.ipvanish.com",
+	"sea.socks.ipvanish.com",
+	//"tor.socks.ipvanish.com",
+
+	//"syd.socks.ipvanish.com",
+	//"par.socks.ipvanish.com",
+	//"fra.socks.ipvanish.com",
+	//"lin.socks.ipvanish.com",
+	//"nrt.socks.ipvanish.com",
+	//"ams.socks.ipvanish.com",
+	//"waw.socks.ipvanish.com",
+	////"lis.socks.ipvanish.com",
+	//"sin.socks.ipvanish.com",
+	//"mad.socks.ipvanish.com",
+	//"sto.socks.ipvanish.com",
+	//"lon.socks.ipvanish.com",
+}
+
 func getHttpClients() []*http.Client {
 	user := os.Getenv("PROXY_USER")
 	pass := os.Getenv("PROXY_PASS")
 
-	hosts := []string{
-		"iad.socks.ipvanish.com",
-		"atl.socks.ipvanish.com",
-		"chi.socks.ipvanish.com",
-		"mia.socks.ipvanish.com",
-		"nyc.socks.ipvanish.com",
-		"dal.socks.ipvanish.com",
-		"den.socks.ipvanish.com",
-		"lax.socks.ipvanish.com",
-		"phx.socks.ipvanish.com",
-		"sea.socks.ipvanish.com",
-		"tor.socks.ipvanish.com",
-
-		"syd.socks.ipvanish.com",
-		"par.socks.ipvanish.com",
-		"fra.socks.ipvanish.com",
-		"lin.socks.ipvanish.com",
-		"nrt.socks.ipvanish.com",
-		"ams.socks.ipvanish.com",
-		"waw.socks.ipvanish.com",
-		"lis.socks.ipvanish.com",
-		"sin.socks.ipvanish.com",
-		"mad.socks.ipvanish.com",
-		"sto.socks.ipvanish.com",
-		"lon.socks.ipvanish.com",
-	}
+	hosts := ProxyHosts
 
 	var clients []*http.Client
 	for _, host := range hosts {

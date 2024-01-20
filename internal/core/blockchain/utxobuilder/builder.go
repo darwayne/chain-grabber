@@ -2,19 +2,35 @@ package utxobuilder
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/darwayne/chain-grabber/internal/core/blockchain"
 	"golang.org/x/sync/errgroup"
 	"log"
 	"maps"
+	"os"
+	"os/signal"
 	"sync"
 	"time"
 )
 
-func NewBuilder(clis []blockchain.Client, store UTXOStore) *Builder {
+func NewBuilder(clis []blockchain.Client, store UTXOStore, db *sql.DB) *Builder {
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		c := make(chan os.Signal, 1)
+		signal.Notify(c, os.Interrupt)
+		for range c {
+			cancel()
+			return
+		}
+	}()
 	return &Builder{
+		db:         db,
+		globalCtx:  ctx,
+		cancel:     cancel,
 		clis:       clis,
 		store:      store,
 		tempBlocks: make(map[int]*wire.MsgBlock),
@@ -22,6 +38,9 @@ func NewBuilder(clis []blockchain.Client, store UTXOStore) *Builder {
 }
 
 type Builder struct {
+	db            *sql.DB
+	globalCtx     context.Context
+	cancel        context.CancelFunc
 	clis          []blockchain.Client
 	mu            sync.RWMutex
 	dataMu        sync.RWMutex
@@ -57,6 +76,12 @@ func (b *Builder) Build() error {
 	go b.poolBlocks(data.StartPoint, maxHeight)
 
 	for i := data.StartPoint; i <= maxHeight; i++ {
+		select {
+		case <-b.globalCtx.Done():
+			return nil
+		default:
+
+		}
 		if err := b.processHeight(i, maxHeight, &data); err != nil {
 			return err
 		}
@@ -112,13 +137,28 @@ func (b *Builder) getBlock(ctx context.Context, height int) (block *wire.MsgBloc
 			block, e = b.getBlock(ctx, height)
 		}
 	}()
-	time.Sleep(50 * time.Millisecond)
-	ctx1, cancel1 := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel1()
-	hash, err := b.getClient().GetBlockHashFromHeight(ctx1, height)
+
+	row := b.db.QueryRowContext(ctx, `select hash from block_height WHERE height = ?`, height)
+	if err := row.Err(); err != nil {
+		return nil, err
+	}
+	var hashStr string
+	if err := row.Scan(&hashStr); err != nil {
+		return nil, err
+	}
+
+	//ctx1, cancel1 := context.WithTimeout(ctx, 10*time.Second)
+	//defer cancel1()
+	//hash, err := b.getClient().GetBlockHashFromHeight(ctx1, height)
+	//if err != nil {
+	//	return nil, err
+	//}
+	hash, err := chainhash.NewHashFromStr(hashStr)
 	if err != nil {
 		return nil, err
 	}
+
+	time.Sleep(50 * time.Millisecond)
 	ctx2, cancel2 := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel2()
 	return b.getClient().GetBlock(ctx2, *hash)
@@ -141,7 +181,7 @@ func (b *Builder) waitForBlock(height int) (*wire.MsgBlock, error) {
 }
 
 func (b *Builder) poolBlocks(startingPoint, maxHeight int) {
-	parentCtx, cancel := context.WithCancel(context.Background())
+	parentCtx, cancel := context.WithCancel(b.globalCtx)
 	defer cancel()
 	group, ctx := errgroup.WithContext(parentCtx)
 	doneChan := make(chan struct{})
@@ -152,6 +192,8 @@ func (b *Builder) poolBlocks(startingPoint, maxHeight int) {
 		group.Go(func() error {
 			for {
 				select {
+				case <-ctx.Done():
+					return nil
 				case <-doneChan:
 					return nil
 				case height := <-workChan:

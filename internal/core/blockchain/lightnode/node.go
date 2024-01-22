@@ -1,7 +1,10 @@
 package lightnode
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
+	"database/sql"
 	"fmt"
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg"
@@ -9,6 +12,7 @@ import (
 	"github.com/btcsuite/btcd/connmgr"
 	"github.com/btcsuite/btcd/peer"
 	"github.com/btcsuite/btcd/wire"
+	_ "github.com/mattn/go-sqlite3"
 	"golang.org/x/net/proxy"
 	"log"
 	"maps"
@@ -64,10 +68,13 @@ func NewTestNet() (*Node, error) {
 }
 
 func NewMainNet() (*Node, error) {
-	d, err := proxy.SOCKS5("tcp", "atl.socks.ipvanish.com:1080", &proxy.Auth{
-		User:     os.Getenv("PROXY_USER"),
-		Password: os.Getenv("PROXY_PASS"),
-	}, &net.Dialer{})
+	d, err := proxy.SOCKS5("tcp",
+		//"atl.socks.ipvanish.com:1080",
+		"mia.socks.ipvanish.com:1080",
+		&proxy.Auth{
+			User:     os.Getenv("PROXY_USER"),
+			Password: os.Getenv("PROXY_PASS"),
+		}, &net.Dialer{})
 	if err != nil {
 		return nil, err
 	}
@@ -100,14 +107,14 @@ func NewNode(dialer proxy.Dialer, chain *chaincfg.Params) *Node {
 }
 
 func (n *Node) Connect() {
-	n.mu.Lock()
-	if n.connected {
-		n.mu.Unlock()
-		return
-	}
-
-	n.connected = true
-	n.mu.Unlock()
+	//n.mu.Lock()
+	//if n.connected {
+	//	n.mu.Unlock()
+	//	return
+	//}
+	//
+	//n.connected = true
+	//n.mu.Unlock()
 	wait := make(chan struct{}, 1)
 	connmgr.SeedFromDNS(n.chain,
 		wire.SFNodeNetwork, net.LookupIP, func(addrs []*wire.NetAddressV2) {
@@ -177,6 +184,7 @@ func (n *Node) connectPeer(addr string) (e error) {
 		connected: make(chan struct{}),
 		onHeaders: make(chan *wire.MsgHeaders, 1),
 		onInvoice: make(chan *wire.MsgInv, 1),
+		onBlock:   make(chan *wire.MsgBlock, 1),
 	}
 	var versionTime time.Time
 	p, err := peer.NewOutboundPeer(&peer.Config{
@@ -270,26 +278,32 @@ func (n *Node) connectPeer(addr string) (e error) {
 				}
 			},
 			OnBlock: func(p *peer.Peer, msg *wire.MsgBlock, buf []byte) {
+				//log.Println("received block from", p, "hash:", msg.BlockHash())
 				select {
 				case n.onPeerBlock <- PeerBlock{Peer: p, MsgBlock: msg}:
+					//log.Println("sent block to global channel", p, "hash:", msg.BlockHash())
 				case <-n.ctx.Done():
 				default:
+
+					//log.Println("block skipped global channel", p, "hash:", msg.BlockHash())
 				}
 				select {
 				case data.onBlock <- msg:
+					//log.Println("sent block to local channel", p, "hash:", msg.BlockHash())
 				case <-n.ctx.Done():
 				default:
+					log.Println("block skipped local channel", p, "hash:", msg.BlockHash())
 				}
 			},
 			OnMerkleBlock: func(p *peer.Peer, msg *wire.MsgMerkleBlock) {
 
 			},
 			OnRead: func(p *peer.Peer, bytesRead int, msg wire.Message, err error) {
-				//fmt.Println("read message", getMessageCommand(msg))
+				//log.Println("read message", getMessageCommand(msg), "from", p)
 				atomic.AddInt64(&data.received, 1)
 			},
 			OnWrite: func(p *peer.Peer, bytesWritten int, msg wire.Message, err error) {
-				//fmt.Println("wrote message", getMessageCommand(msg))
+				//log.Println("wrote message", getMessageCommand(msg), "to", p)
 				atomic.AddInt64(&data.received, 1)
 			},
 		},
@@ -331,6 +345,11 @@ func (n *Node) connectPeer(addr string) (e error) {
 	return nil
 }
 
+func (n *Node) TotalPeers() int {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return len(n.peers)
+}
 func (n *Node) GetPeer() *peer.Peer {
 	n.mu.RLock()
 	data := maps.Clone(n.peers)
@@ -350,11 +369,19 @@ func (n *Node) GetPeer() *peer.Peer {
 	}
 	idx := n.peerIdx
 	n.mu.Unlock()
+	if len(peers) == 0 {
+		return nil
+	}
 
 	return peers[idx]
 }
 
 func (n *Node) PopulateHeaders() {
+	if 1 == 1 {
+		return
+		// TODO: all the logic below should live somewhere else
+		// 	node should just be a node
+	}
 	n.mu.RLock()
 	peers := maps.Clone(n.peers)
 	n.mu.RUnlock()
@@ -397,6 +424,36 @@ func (n *Node) PopulateHeaders() {
 		}
 	}()
 
+	folder := "./storedblocks"
+	if n.chain == &chaincfg.MainNetParams {
+		folder += "/mainnet/"
+	} else {
+		folder += "/testnet/"
+	}
+	folder += "blocks.sqlite"
+
+	db, err := sql.Open("sqlite3", folder+"?journal_mode=WAL")
+	if err != nil {
+		log.Fatalln(err)
+	}
+	go func() {
+		select {
+		case <-n.ctx.Done():
+			db.Close()
+		}
+	}()
+
+	const create string = `
+  CREATE TABLE IF NOT EXISTS blocks (
+  hash text NOT NULL PRIMARY KEY,
+  data BLOB NOT NULL
+  );`
+
+	_, err = db.Exec(create)
+	if err != nil {
+		log.Fatalln("error setting up sqlite", err)
+	}
+
 	blockChan := make(chan chainhash.Hash, 1)
 	go func() {
 		var blockMu sync.RWMutex
@@ -406,14 +463,63 @@ func (n *Node) PopulateHeaders() {
 			pendingBlocks := make(map[chainhash.Hash]struct{})
 			myBlocks := make(map[chainhash.Hash]*wire.MsgBlock)
 
+			//var lastPurge = time.Now()
 			work := func() {
+
+				if len(myBlocks) > 1 { //} && time.Since(lastPurge) > time.Minute {
+					start := time.Now()
+					fmt.Println("flushing blocks to disk")
+					maxToPurge := 0
+					tx, err := db.Begin()
+					if err != nil {
+						log.Fatalln("error opening transaction", err)
+					}
+					defer tx.Commit()
+					stmt, err := tx.PrepareContext(n.ctx, `INSERT OR IGNORE into blocks VALUES(?, ?)`)
+					if err != nil {
+						log.Fatalln("error opening statement", err)
+					}
+					defer stmt.Close()
+					for hash, block := range myBlocks {
+						maxToPurge++
+
+						err := func() error {
+							f := new(bytes.Buffer)
+							writer, err := gzip.NewWriterLevel(f, gzip.BestCompression)
+							if err != nil {
+								return err
+							}
+
+							if err := block.Serialize(writer); err != nil {
+								return err
+							}
+							writer.Close()
+							_, err = stmt.ExecContext(
+								n.ctx,
+								hash.String(), f.String())
+
+							return err
+						}()
+
+						if err != nil {
+							log.Fatalln("error writing block", err)
+						}
+						delete(myBlocks, hash)
+
+					}
+
+					//lastPurge = time.Now()
+					log.Println(maxToPurge, "blocks flushed to disk", time.Since(start))
+
+				}
+
 				invoices := make([]*wire.InvVect, 0, len(pendingBlocks))
 
 				for hash := range pendingBlocks {
 					hash := hash
 					invoices = append(invoices, wire.NewInvVect(wire.InvTypeBlock, &hash))
 				}
-				for _, chunk := range ChunkSlice(invoices, 500) {
+				for _, chunk := range ChunkSlice(invoices, 100) {
 					chunk := chunk
 					data := wire.NewMsgGetData()
 					data.InvList = chunk

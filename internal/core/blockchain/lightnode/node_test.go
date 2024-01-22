@@ -1,6 +1,10 @@
 package lightnode
 
 import (
+	"bytes"
+	"compress/gzip"
+	"context"
+	"database/sql"
 	"fmt"
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg"
@@ -8,6 +12,7 @@ import (
 	"github.com/btcsuite/btcd/connmgr"
 	"github.com/btcsuite/btcd/peer"
 	"github.com/btcsuite/btcd/wire"
+	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/net/proxy"
 	"log"
@@ -20,6 +25,96 @@ import (
 	"time"
 )
 
+func TestBlockStore(t *testing.T) {
+	store := NewBlockStore(&chaincfg.MainNetParams)
+	ctx := context.Background()
+	t.Log(store.GetTip(ctx))
+}
+
+func TestSQLITECopyHeightToBlockDB(t *testing.T) {
+	ddb, err := sql.Open("sqlite3", "./storedblocks/mainnet/blocks.sqlite")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ddb.Close()
+	})
+
+	const create string = `
+  CREATE TABLE IF NOT EXISTS height (
+  height UNSIGNED BIG INT NOT NULL PRIMARY KEY,
+  hash text NOT NULL
+  );`
+
+	_, err = ddb.Exec(create)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	db, err := ddb.Conn(ctx)
+	require.NoError(t, err)
+
+	_, err = db.ExecContext(ctx, `ATTACH './storedblocks/mainnet/height.sqlite' as hdb`)
+	require.NoError(t, err)
+
+	_, err = db.ExecContext(ctx, `
+INSERT OR IGNORE INTO height (height, hash)
+select height, hash from hdb.block_height`)
+	require.NoError(t, err)
+
+}
+
+func TestSQLITEMissingBlocks(t *testing.T) {
+	ddb, err := sql.Open("sqlite3", "./storedblocks/mainnet/height.sqlite")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ddb.Close()
+	})
+
+	ctx := context.Background()
+	db, err := ddb.Conn(ctx)
+	require.NoError(t, err)
+
+	_, err = db.ExecContext(ctx, `ATTACH './storedblocks/mainnet/blocks.sqlite' as bdb`)
+	require.NoError(t, err)
+
+	rows, err := db.QueryContext(ctx, `
+select height, bh.hash, b.hash from block_height bh
+LEFT JOIN bdb.blocks b ON b.hash = bh.hash
+WHERE height < 400000 AND b.hash IS NOT NULL
+ORDER BY height asc`)
+	require.NoError(t, err)
+	for rows.Next() {
+		var height int
+		var hash string
+		var missingHash *string
+		err = rows.Scan(&height, &hash, &missingHash)
+		require.NoError(t, err)
+		t.Log(height, hash, missingHash)
+	}
+}
+
+func TestSQLITEBlockRead(t *testing.T) {
+	ddb, err := sql.Open("sqlite3", "./storedblocks/mainnet/blocks.sqlite")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ddb.Close()
+	})
+
+	ctx := context.Background()
+	db, err := ddb.Conn(ctx)
+	require.NoError(t, err)
+
+	row := db.QueryRowContext(ctx, `select data from blocks WHERE hash = ?`, "0000000000000000000060e32d547b6ae2ded52aadbc6310808e4ae42b08cc6a")
+	require.NoError(t, row.Err())
+	var data []byte
+	require.NoError(t, row.Scan(&data))
+	buff := bytes.NewBuffer(data)
+	reader, err := gzip.NewReader(buff)
+	require.NoError(t, err)
+	var block wire.MsgBlock
+	require.NoError(t, block.Deserialize(reader))
+
+	t.Log(len(block.Transactions))
+}
+
 func TestTestNet(t *testing.T) {
 	node, err := NewTestNet()
 	require.NoError(t, err)
@@ -27,8 +122,6 @@ func TestTestNet(t *testing.T) {
 	go func() {
 		for {
 			select {
-			case <-time.After(time.Second):
-				_ = fmt.Sprintf("")
 			case peer := <-node.peerConnected:
 				data := node.GetPeerData(peer)
 				fmt.Println("node connected", atomic.LoadInt64(&node.connectedPeers),
@@ -42,6 +135,7 @@ func TestTestNet(t *testing.T) {
 	node.PopulateHeaders()
 	select {
 	case <-node.Done():
+		time.Sleep(time.Second)
 	}
 }
 
@@ -62,8 +156,10 @@ func TestMainNet(t *testing.T) {
 	go func() {
 		for {
 			select {
-			case <-node.peerConnected:
-				fmt.Println("node connected", atomic.LoadInt64(&node.connectedPeers))
+			case peer := <-node.peerConnected:
+				data := node.GetPeerData(peer)
+				fmt.Println("node connected", atomic.LoadInt64(&node.connectedPeers),
+					"\tversionLatency:", data.versionLatency)
 			}
 		}
 	}()
@@ -73,6 +169,7 @@ func TestMainNet(t *testing.T) {
 	node.PopulateHeaders()
 	select {
 	case <-node.Done():
+		time.Sleep(time.Second)
 	}
 }
 

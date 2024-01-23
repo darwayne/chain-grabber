@@ -46,6 +46,7 @@ type Node struct {
 
 type peerData struct {
 	connected      chan struct{}
+	disconnected   chan struct{}
 	onHeaders      chan *wire.MsgHeaders
 	onInvoice      chan *wire.MsgInv
 	onBlock        chan *wire.MsgBlock
@@ -181,10 +182,11 @@ func (n *Node) connectPeer(addr string) (e error) {
 	//	}
 	//}()
 	data := &peerData{
-		connected: make(chan struct{}),
-		onHeaders: make(chan *wire.MsgHeaders, 1),
-		onInvoice: make(chan *wire.MsgInv, 1),
-		onBlock:   make(chan *wire.MsgBlock, 1),
+		connected:    make(chan struct{}),
+		disconnected: make(chan struct{}),
+		onHeaders:    make(chan *wire.MsgHeaders, 1),
+		onInvoice:    make(chan *wire.MsgInv, 1),
+		onBlock:      make(chan *wire.MsgBlock, 1),
 	}
 	var versionTime time.Time
 	p, err := peer.NewOutboundPeer(&peer.Config{
@@ -263,6 +265,7 @@ func (n *Node) connectPeer(addr string) (e error) {
 				case data.onHeaders <- msg:
 				case <-n.ctx.Done():
 				default:
+					log.Println("skipped local headers message", p)
 				}
 			},
 			OnInv: func(p *peer.Peer, msg *wire.MsgInv) {
@@ -328,6 +331,7 @@ func (n *Node) connectPeer(addr string) (e error) {
 	}()
 	go func() {
 		p.WaitForDisconnect()
+		close(data.disconnected)
 		atomic.AddInt64(&n.connectedPeers, -1)
 		n.mu.Lock()
 		delete(n.peers, p)

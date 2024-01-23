@@ -5,6 +5,8 @@ import (
 	"compress/gzip"
 	"context"
 	"fmt"
+	"github.com/btcsuite/btcd/blockchain"
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/peer"
@@ -46,11 +48,84 @@ func TestPutBlocks(t *testing.T) {
 
 }
 
-func TestArr(t *testing.T) {
-	hey := []int{1, 2, 3}
-	hey = hey[len(hey):]
+func TestListBlocks(t *testing.T) {
+	store := NewBlockStore(&chaincfg.MainNetParams)
 
-	fmt.Println(hey)
+	startFrom := 0
+	limit := 10_000
+
+	var mu sync.RWMutex
+	outputs := make(map[wire.OutPoint]int64)
+	start := time.Now()
+	var bHeight int64
+	//var total int64
+	var blockFees int64
+	go func() {
+		for {
+			time.Sleep(time.Second)
+			//totals := atomic.LoadInt64(&total)
+			blockHeight := atomic.LoadInt64(&bHeight)
+			mu.RLock()
+			total := len(outputs)
+			mu.RUnlock()
+			totalFees := atomic.LoadInt64(&blockFees)
+
+			t.Log(float64(blockHeight)/time.Since(start).Seconds(), "blocks per second",
+				"total utxos", total, "last block",
+				blockHeight, "\n",
+				"fee total:", btcutil.Amount(totalFees),
+				"fee avg:", btcutil.Amount(totalFees/blockHeight),
+			)
+		}
+	}()
+
+	for {
+		results, err := store.ListBlocks(context.Background(), startFrom, limit)
+		require.NoError(t, err)
+		if len(results) < limit {
+			break
+		}
+		startFrom += len(results)
+
+		for _, r := range results {
+			var totalFee int64
+			atomic.StoreInt64(&bHeight, int64(r.Height))
+			for txIdx, tx := range r.Transactions {
+				var txFee int64
+				_ = tx
+				hash := tx.TxHash()
+				//atomic.AddInt64(&total, 1)
+				mu.Lock()
+				for _, input := range tx.TxIn {
+					if txIdx > 0 {
+						txFee += outputs[input.PreviousOutPoint]
+					}
+
+					delete(outputs, input.PreviousOutPoint)
+				}
+
+				for idx, out := range tx.TxOut {
+					outputs[wire.OutPoint{
+						Hash:  hash,
+						Index: uint32(idx),
+					}] = out.Value
+
+					if txIdx > 0 {
+						txFee -= out.Value
+					}
+
+				}
+				mu.Unlock()
+				totalFee += txFee
+
+			}
+
+			//fmt.Println(r.Height, "block fee", btcutil.Amount(totalFee))
+			atomic.AddInt64(&blockFees, totalFee)
+
+			//return
+		}
+	}
 }
 
 func TestValidateBlockSerialization(t *testing.T) {
@@ -129,9 +204,9 @@ func TestFillMissingBlocks(t *testing.T) {
 	var dataToSend []BlockHeight
 	for missing := range store.MissingBlocks(ctx) {
 		require.NoError(t, missing.Err)
-		if missing.Hash == *chaincfg.MainNetParams.GenesisHash {
-			continue
-		}
+		//if missing.Hash == *chaincfg.MainNetParams.GenesisHash {
+		//	continue
+		//}
 		dataToSend = append(dataToSend, missing.BlockHeight)
 	}
 	t.Log(len(dataToSend), "missing blocks")
@@ -197,7 +272,7 @@ func TestFillMissingBlocks(t *testing.T) {
 		}
 	}()
 
-	const batchSize = 100
+	const batchSize = 1
 	blockReqChan := make(chan []chainhash.Hash, 1)
 	newWorker := func(peer *peer.Peer) {
 		doneChan := make(chan struct{})
@@ -234,7 +309,7 @@ func TestFillMissingBlocks(t *testing.T) {
 					peer.QueueMessage(data, nil)
 				tryAgain:
 					select {
-					case <-time.After(30 * time.Second):
+					case <-time.After(5 * time.Second):
 						if len(hashes) == batchSize {
 							peer.Disconnect()
 							peer.WaitForDisconnect()
@@ -314,6 +389,128 @@ func TestFillMissingBlocks(t *testing.T) {
 	fmt.Println(total, "blocks requested")
 
 	select {}
+
+}
+
+func TestUpdateBlockHeights(t *testing.T) {
+	node, err := NewMainNet()
+	require.NoError(t, err)
+
+	store := NewBlockStore(&chaincfg.MainNetParams)
+	t.Cleanup(func() {
+		store.Close()
+	})
+
+	ctx := context.Background()
+	height, err := store.GetTip(ctx)
+	require.NoError(t, err)
+
+	var mu sync.RWMutex
+	knownHash := make(map[chainhash.Hash]struct{})
+	var hashes []BlockHeight
+	hashes = append(hashes, *height)
+	knownHash[height.Hash] = struct{}{}
+
+	headerReq := make(chan chainhash.Hash, 1)
+	headerReq <- height.Hash
+	newWorker := func(peer *peer.Peer) {
+		pData := node.GetPeerData(peer)
+		if pData == nil {
+			return
+		}
+		for {
+			select {
+			case <-pData.disconnected:
+				return
+			case req := <-headerReq:
+				mu.RLock()
+				lastHash := hashes[len(hashes)-1]
+				mu.RUnlock()
+				err := peer.PushGetHeadersMsg(blockchain.BlockLocator{&lastHash.Hash}, &chainhash.Hash{})
+				if err != nil {
+					headerReq <- req
+					continue
+				}
+
+				select {
+				case msg := <-pData.onHeaders:
+					newChunk := make([]BlockHeight, 0)
+
+					for _, header := range msg.Headers {
+						if header.PrevBlock == lastHash.Hash {
+							lastHash = BlockHeight{
+								Height: lastHash.Height + 1,
+								Hash:   header.BlockHash(),
+							}
+							newChunk = append(newChunk, lastHash)
+
+						}
+					}
+
+					if err := store.PutHeights(ctx, newChunk...); err != nil {
+						log.Println("error putting heights", err)
+						continue
+					}
+					fmt.Println("wrote", len(newChunk), "new headers to DB")
+					mu.Lock()
+					for _, headers := range msg.Headers {
+						lastHeight := hashes[len(hashes)-1]
+						if lastHeight.Hash == headers.PrevBlock {
+							hashes = append(hashes, BlockHeight{
+								Height: lastHeight.Height + 1,
+								Hash:   headers.BlockHash(),
+							})
+						}
+					}
+
+					lastHash = hashes[len(hashes)-1]
+					mu.Unlock()
+					if len(msg.Headers) > 1500 {
+						headerReq <- lastHash.Hash
+					}
+
+				case <-time.After(10 * time.Second):
+					block, err := store.GetBlock(ctx, lastHash.Hash)
+					require.NoError(t, err)
+					earliestTime := time.Now().Add(-3 * time.Hour)
+					if block.Header.Timestamp.After(earliestTime) {
+						fmt.Println("recent block mined at", block.Header.Timestamp, "skipping header check for now")
+						continue
+					}
+					go func() {
+						log.Println("disconnecting from peer", peer, "no headers detected")
+						peer.Disconnect()
+						peer.WaitForDisconnect()
+
+						headerReq <- req
+					}()
+
+					return
+				}
+			}
+		}
+	}
+
+	go node.Connect()
+	go func() {
+		for {
+			select {
+			case peer := <-node.peerConnected:
+				data := node.GetPeerData(peer)
+				if data == nil {
+					continue
+				}
+				log.Println("connected to", peer, "latency", data.versionLatency)
+				go newWorker(peer)
+			}
+		}
+	}()
+
+	select {}
+
+	_ = height
+
+	_ = node
 
 }
 

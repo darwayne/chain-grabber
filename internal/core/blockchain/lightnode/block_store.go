@@ -12,9 +12,11 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"golang.org/x/sync/errgroup"
 	"log"
+	"math"
 	"os"
 	"os/signal"
 	"runtime"
+	"sort"
 	"sync"
 )
 
@@ -33,7 +35,7 @@ func NewBlockStore(chain *chaincfg.Params) *BlockStore {
 	if err != nil {
 		panic(err)
 	}
-	db.SetMaxOpenConns(1)
+	//db.SetMaxOpenConns(1)
 	setupDB(db)
 	_, err = db.Exec("PRAGMA journal_mode = wal;")
 	if err != nil {
@@ -221,6 +223,100 @@ type BlockHeight struct {
 type BlockHeightStream struct {
 	BlockHeight
 	Err error
+}
+
+type BlockWithHeight struct {
+	*wire.MsgBlock
+	Height int
+}
+
+func (b *BlockStore) ListBlocks(ctx context.Context, blockHeight, limit int) ([]BlockWithHeight, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	total := limit
+	pieces := runtime.NumCPU()
+	l := int(math.Ceil(float64(total) / float64(pieces)))
+	startFrom := blockHeight
+	max := blockHeight + total
+
+	type resultStream struct {
+		results []BlockWithHeight
+		err     error
+	}
+
+	group, gctx := errgroup.WithContext(ctx)
+	group.SetLimit(pieces)
+	work := make(chan resultStream, 1)
+	for i := startFrom; i < max; i += l {
+		offset := i
+		group.Go(func() error {
+			results, err := b.listBlocks(gctx, offset, l)
+			select {
+			case work <- resultStream{results: results, err: err}:
+				return err
+			case <-gctx.Done():
+				return gctx.Err()
+			}
+		})
+	}
+
+	errChan := make(chan error, 1)
+	go func() {
+		errChan <- group.Wait()
+		close(work)
+		close(errChan)
+	}()
+
+	var results []BlockWithHeight
+
+	for info := range work {
+		if info.err != nil {
+			return nil, info.err
+		}
+		results = append(results, info.results...)
+	}
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Height < results[j].Height
+	})
+	if len(results) > limit {
+		results = results[:limit]
+	}
+	return results, <-errChan
+}
+
+func (b *BlockStore) listBlocks(ctx context.Context, blockHeight, limit int) ([]BlockWithHeight, error) {
+	rows, err := b.db.QueryContext(ctx, `
+select height, b.data from height bh
+LEFT JOIN blocks b ON b.hash = bh.hash
+WHERE  b.hash IS NOT  NULL AND height >= ?
+ORDER BY height asc
+LIMIT ?
+`, blockHeight, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	results := make([]BlockWithHeight, 0, limit)
+	for rows.Next() {
+		if err = rows.Err(); err != nil {
+			return nil, err
+		}
+		var data []byte
+		var height int
+		if err = rows.Scan(&height, &data); err != nil {
+			return nil, err
+		}
+
+		block, err := bytesToBlock(data)
+		if err != nil {
+			return nil, err
+		}
+
+		results = append(results, BlockWithHeight{MsgBlock: block, Height: height})
+	}
+
+	return results, nil
 }
 
 func (b *BlockStore) MissingBlocks(ctx context.Context) <-chan BlockHeightStream {

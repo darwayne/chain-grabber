@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"database/sql"
+	"encoding/gob"
 	"fmt"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -17,12 +18,14 @@ import (
 	"os/signal"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 )
 
 type BlockStore struct {
-	chain *chaincfg.Params
-	db    *sql.DB
+	chain   *chaincfg.Params
+	db      *sql.DB
+	lightDB *sql.DB
 }
 
 func NewBlockStore(chain *chaincfg.Params) *BlockStore {
@@ -30,6 +33,12 @@ func NewBlockStore(chain *chaincfg.Params) *BlockStore {
 	if chain != &chaincfg.MainNetParams {
 		location = "./storedblocks/testnet/blocks.sqlite"
 	}
+	lightLocation := strings.Replace(location, "blocks.", "light-blocks.", 1)
+	lightDB, err := sql.Open("sqlite3", lightLocation)
+	if err != nil {
+		panic(err)
+	}
+	setupLightDB(lightDB)
 
 	db, err := sql.Open("sqlite3", location) //+"?journal_mode=WAL")
 	if err != nil {
@@ -42,7 +51,7 @@ func NewBlockStore(chain *chaincfg.Params) *BlockStore {
 		log.Fatal(err)
 	}
 
-	return &BlockStore{chain: chain, db: db}
+	return &BlockStore{chain: chain, db: db, lightDB: lightDB}
 }
 
 func (b *BlockStore) DeleteBlock(ctx context.Context, hash chainhash.Hash) error {
@@ -230,6 +239,60 @@ type BlockWithHeight struct {
 	Height int
 }
 
+func (b *BlockStore) ListLightBlocks(ctx context.Context, blockHeight, limit int) ([]LightBlock, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	total := limit
+	pieces := runtime.NumCPU()
+	l := int(math.Ceil(float64(total) / float64(pieces)))
+	startFrom := blockHeight
+	max := blockHeight + total
+
+	type resultStream struct {
+		results []LightBlock
+		err     error
+	}
+
+	group, gctx := errgroup.WithContext(ctx)
+	group.SetLimit(pieces)
+	work := make(chan resultStream, 1)
+	for i := startFrom; i < max; i += l {
+		offset := i
+		group.Go(func() error {
+			results, err := b.listLightBlocks(gctx, offset, l)
+			select {
+			case work <- resultStream{results: results, err: err}:
+				return err
+			case <-gctx.Done():
+				return gctx.Err()
+			}
+		})
+	}
+
+	errChan := make(chan error, 1)
+	go func() {
+		errChan <- group.Wait()
+		close(work)
+		close(errChan)
+	}()
+
+	var results []LightBlock
+
+	for info := range work {
+		if info.err != nil {
+			return nil, info.err
+		}
+		results = append(results, info.results...)
+	}
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Height < results[j].Height
+	})
+	if len(results) > limit {
+		results = results[:limit]
+	}
+	return results, <-errChan
+}
+
 func (b *BlockStore) ListBlocks(ctx context.Context, blockHeight, limit int) ([]BlockWithHeight, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -314,6 +377,39 @@ LIMIT ?
 		}
 
 		results = append(results, BlockWithHeight{MsgBlock: block, Height: height})
+	}
+
+	return results, nil
+}
+
+func (b *BlockStore) listLightBlocks(ctx context.Context, blockHeight, limit int) ([]LightBlock, error) {
+	rows, err := b.lightDB.QueryContext(ctx, `
+select data from light_blocks
+WHERE height >= ?
+ORDER BY height asc
+LIMIT ?
+`, blockHeight, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	results := make([]LightBlock, 0, limit)
+	for rows.Next() {
+		if err = rows.Err(); err != nil {
+			return nil, err
+		}
+		var data []byte
+		if err = rows.Scan(&data); err != nil {
+			return nil, err
+		}
+
+		block, err := bytesToLightBlock(data)
+		if err != nil {
+			return nil, err
+		}
+
+		results = append(results, block)
 	}
 
 	return results, nil
@@ -481,7 +577,21 @@ func (b *BlockStore) Close() {
 	b.db.Close()
 }
 
+func setupLightDB(db *sql.DB) {
+	closeOnExit(db)
+	const query string = `
+  CREATE TABLE IF NOT EXISTS light_blocks (
+  height UNSIGNED INT NOT NULL PRIMARY KEY,
+  data BLOB NOT NULL
+  );`
+
+	_, err := db.Exec(query)
+	if err != nil {
+		panic(err)
+	}
+}
 func setupDB(db *sql.DB) {
+	closeOnExit(db)
 	tables := []string{
 		`
   CREATE TABLE IF NOT EXISTS height (
@@ -502,6 +612,9 @@ func setupDB(db *sql.DB) {
 		}
 	}
 
+}
+
+func closeOnExit(db *sql.DB) {
 	go func() {
 		c := make(chan os.Signal, 1)
 		signal.Notify(c, os.Interrupt)
@@ -511,7 +624,6 @@ func setupDB(db *sql.DB) {
 		fmt.Println("closing db")
 		db.Close()
 	}()
-
 }
 
 func bytesToBlock(data []byte) (*wire.MsgBlock, error) {
@@ -525,4 +637,26 @@ func bytesToBlock(data []byte) (*wire.MsgBlock, error) {
 		return nil, err
 	}
 	return &block, nil
+}
+
+func bytesToLightBlock(data []byte) (LightBlock, error) {
+	buff := bytes.NewBuffer(data)
+	dec := gob.NewDecoder(buff)
+	var result LightBlock
+	if err := dec.Decode(&result); err != nil {
+		return LightBlock{}, err
+	}
+
+	return result, nil
+}
+
+type LightTransaction struct {
+	Hash    chainhash.Hash
+	Inputs  []wire.OutPoint
+	Outputs []int64
+}
+
+type LightBlock struct {
+	Height       int
+	Transactions []LightTransaction
 }

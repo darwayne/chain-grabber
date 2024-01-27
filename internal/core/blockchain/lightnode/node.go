@@ -12,6 +12,7 @@ import (
 	"github.com/btcsuite/btcd/connmgr"
 	"github.com/btcsuite/btcd/peer"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/darwayne/errutil"
 	_ "github.com/mattn/go-sqlite3"
 	"golang.org/x/net/proxy"
 	"log"
@@ -50,6 +51,7 @@ type peerData struct {
 	onHeaders      chan *wire.MsgHeaders
 	onInvoice      chan *wire.MsgInv
 	onBlock        chan *wire.MsgBlock
+	onGetData      chan *wire.MsgGetData
 	sent           int64
 	received       int64
 	versionLatency time.Duration
@@ -99,12 +101,31 @@ func NewNode(dialer proxy.Dialer, chain *chaincfg.Params) *Node {
 		chain:            chain,
 		peers:            make(map[*peer.Peer]*peerData),
 		initialPeers:     make(map[string]struct{}),
-		peerConnected:    make(chan *peer.Peer),
-		peerDisconnected: make(chan *peer.Peer),
+		peerConnected:    make(chan *peer.Peer, 100),
+		peerDisconnected: make(chan *peer.Peer, 100),
 		onPeerBlock:      make(chan PeerBlock, 100),
 		onPeerHeaders:    make(chan PeerHeaders, 100),
 		onPeerInv:        make(chan PeerInv, 100),
 	}
+}
+
+func (n *Node) ConnectV2() {
+	connmgr.SeedFromDNS(n.chain,
+		wire.SFNodeNetwork, net.LookupIP, func(addrs []*wire.NetAddressV2) {
+			fmt.Println("got", len(addrs), "from dns")
+			for _, addr := range addrs {
+				if strings.Contains(addr.Addr.String(), ":") {
+					//fmt.Println("skipping address", addr)
+					//continue
+				}
+
+				//fmt.Println("adding", addr.Addr, "to list")
+
+				connectionAddr := fmt.Sprintf("%s:%d", addr.Addr.String(), addr.Port)
+				go n.connectPeer(connectionAddr)
+			}
+			//n.ConnectV2()
+		})
 }
 
 func (n *Node) Connect() {
@@ -121,8 +142,11 @@ func (n *Node) Connect() {
 		wire.SFNodeNetwork, net.LookupIP, func(addrs []*wire.NetAddressV2) {
 			for _, addr := range addrs {
 				if strings.Contains(addr.Addr.String(), ":") {
+					fmt.Println("skipping address", addr)
 					continue
 				}
+
+				fmt.Println("adding", addr.Addr, "to list")
 
 				n.mu.Lock()
 				n.initialPeers[fmt.Sprintf("%s:%d", addr.Addr.String(), addr.Port)] = struct{}{}
@@ -173,7 +197,46 @@ func (n *Node) GetPeerData(p *peer.Peer) *peerData {
 	return data
 }
 
+func (n *Node) SendTransactionToPeer(ctx context.Context, peer *peer.Peer, tx *wire.MsgTx) error {
+	info := n.GetPeerData(peer)
+	if info == nil {
+		return errutil.NewNotFound("peer data not found")
+	}
+	var msg wire.MsgInv
+
+	hash := tx.TxHash()
+	err := msg.AddInvVect(wire.NewInvVect(wire.InvTypeTx, &hash))
+	if err != nil {
+		return err
+	}
+	peer.QueueMessage(&msg, nil)
+	// wait for getData message that matches my hash
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case req := <-info.onGetData:
+			for _, inv := range req.InvList {
+				if inv.Type != wire.InvTypeTx || inv.Hash != hash {
+					continue
+				}
+				peer.QueueMessage(tx, nil)
+				return nil
+			}
+		}
+	}
+}
+
+func (n *Node) TotalPeers() int64 {
+	return atomic.LoadInt64(&n.connectedPeers)
+}
+
 func (n *Node) connectPeer(addr string) (e error) {
+	atomic.AddInt64(&n.connectedPeers, 1)
+	if n.TotalPeers() > 100 {
+		atomic.AddInt64(&n.connectedPeers, -1)
+		return
+	}
 	//defer func() {
 	//	if e != nil {
 	//		n.mu.Lock()
@@ -181,17 +244,26 @@ func (n *Node) connectPeer(addr string) (e error) {
 	//		n.mu.Unlock()
 	//	}
 	//}()
+	n.mu.Lock()
+	if _, found := n.initialPeers[addr]; found {
+		n.mu.Unlock()
+		return
+	}
+	n.initialPeers[addr] = struct{}{}
+	n.mu.Unlock()
 	data := &peerData{
 		connected:    make(chan struct{}),
 		disconnected: make(chan struct{}),
 		onHeaders:    make(chan *wire.MsgHeaders, 1),
 		onInvoice:    make(chan *wire.MsgInv, 1),
 		onBlock:      make(chan *wire.MsgBlock, 1),
+		onGetData:    make(chan *wire.MsgGetData),
 	}
 	var versionTime time.Time
 	p, err := peer.NewOutboundPeer(&peer.Config{
 		ChainParams: n.chain,
 		NewestBlock: n.newestBlock,
+		Services:    wire.SFNodeNetwork | wire.SFNodeNetworkLimited,
 		Listeners: peer.MessageListeners{
 			OnAddr: func(p *peer.Peer, msg *wire.MsgAddr) {
 				//fmt.Println("got v1 addresses", len(msg.AddrList))
@@ -213,6 +285,13 @@ func (n *Node) connectPeer(addr string) (e error) {
 					if atomic.LoadInt64(&n.connectedPeers) <= 1000 {
 						go n.connectPeer(addr)
 					}
+
+				}
+			},
+			OnGetData: func(p *peer.Peer, msg *wire.MsgGetData) {
+				select {
+				case data.onGetData <- msg:
+				default:
 
 				}
 			},
@@ -301,12 +380,15 @@ func (n *Node) connectPeer(addr string) (e error) {
 			OnMerkleBlock: func(p *peer.Peer, msg *wire.MsgMerkleBlock) {
 
 			},
+			OnReject: func(p *peer.Peer, msg *wire.MsgReject) {
+				fmt.Println("got reject of", msg.Hash, msg.Reason)
+			},
 			OnRead: func(p *peer.Peer, bytesRead int, msg wire.Message, err error) {
-				//log.Println("read message", getMessageCommand(msg), "from", p)
+				log.Println("read message", getMessageCommand(msg), "from", p)
 				atomic.AddInt64(&data.received, 1)
 			},
 			OnWrite: func(p *peer.Peer, bytesWritten int, msg wire.Message, err error) {
-				//log.Println("wrote message", getMessageCommand(msg), "to", p)
+				log.Println("wrote message", getMessageCommand(msg), "to", p)
 				atomic.AddInt64(&data.received, 1)
 			},
 		},
@@ -320,8 +402,12 @@ func (n *Node) connectPeer(addr string) (e error) {
 		//log.Println("error connecting to outbound peer at", addr, "\nerr:", err)
 		return err
 	}
+
+	n.mu.Lock()
+	n.peers[p] = data
+	n.mu.Unlock()
+
 	p.AssociateConnection(conn)
-	atomic.AddInt64(&n.connectedPeers, 1)
 
 	go func() {
 		select {
@@ -343,17 +429,9 @@ func (n *Node) connectPeer(addr string) (e error) {
 		}
 	}()
 
-	n.mu.Lock()
-	n.peers[p] = data
-	n.mu.Unlock()
 	return nil
 }
 
-func (n *Node) TotalPeers() int {
-	n.mu.RLock()
-	defer n.mu.RUnlock()
-	return len(n.peers)
-}
 func (n *Node) GetPeer() *peer.Peer {
 	n.mu.RLock()
 	data := maps.Clone(n.peers)

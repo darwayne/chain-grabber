@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"database/sql"
+	"encoding/gob"
 	"fmt"
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/btcutil"
@@ -14,6 +16,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 	"log"
+	"os"
+	"os/signal"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -48,11 +52,305 @@ func TestPutBlocks(t *testing.T) {
 
 }
 
+func TestLightBlocks(t *testing.T) {
+
+	store := NewBlockStore(&chaincfg.MainNetParams)
+
+	ddb, err := sql.Open("sqlite3", "./storedblocks/mainnet/light-blocks.sqlite")
+	require.NoError(t, err)
+	go func() {
+		c := make(chan os.Signal, 1)
+		signal.Notify(c, os.Interrupt)
+		select {
+		case <-c:
+		}
+		fmt.Println("closing db")
+		ddb.Close()
+	}()
+
+	t.Cleanup(func() {
+		ddb.Close()
+	})
+
+	const create string = `
+  CREATE TABLE IF NOT EXISTS light_blocks (
+  height UNSIGNED INT NOT NULL PRIMARY KEY,
+  data BLOB NOT NULL
+  );`
+
+	_, err = ddb.Exec(create)
+	require.NoError(t, err)
+
+	row := ddb.QueryRow("select height from light_blocks ORDER BY height DESC LIMIT 1")
+
+	startFrom := 0
+	require.NoError(t, row.Err())
+	if row.Err() == nil {
+		row.Scan(&startFrom)
+	}
+	limit := 1000
+	for {
+		blocks, err := store.ListBlocks(context.Background(), startFrom, limit)
+		require.NoError(t, err)
+		if len(blocks) == 0 {
+			return
+		}
+
+		func() (e error) {
+			tx, err := ddb.Begin()
+			require.NoError(t, err)
+			defer func() {
+				if e != nil {
+					tx.Rollback()
+				}
+
+				require.NoError(t, err)
+				startFrom += limit
+				log.Println(startFrom, "blocks stored")
+			}()
+
+			stmt, err := tx.PrepareContext(context.Background(), `INSERT OR IGNORE into light_blocks VALUES(?, ?)`)
+			if err != nil {
+				return err
+			}
+			defer stmt.Close()
+
+			buff := new(bytes.Buffer)
+			for _, b := range blocks {
+				buff.Reset()
+				block := LightBlock{
+					Height:       b.Height,
+					Transactions: make([]LightTransaction, 0, len(b.Transactions)),
+				}
+				for _, tx := range b.Transactions {
+					lighTx := LightTransaction{
+						Hash:    tx.TxHash(),
+						Inputs:  make([]wire.OutPoint, 0, len(tx.TxIn)),
+						Outputs: make([]int64, 0, len(tx.TxOut)),
+					}
+					for _, in := range tx.TxIn {
+						lighTx.Inputs = append(lighTx.Inputs, in.PreviousOutPoint)
+					}
+					for _, out := range tx.TxOut {
+						lighTx.Outputs = append(lighTx.Outputs, out.Value)
+					}
+					block.Transactions = append(block.Transactions, lighTx)
+				}
+
+				enc := gob.NewEncoder(buff)
+				if err = enc.Encode(block); err != nil {
+					return err
+				}
+
+				_, err = stmt.Exec(block.Height, buff.Bytes())
+				if err != nil {
+					return err
+				}
+
+			}
+
+			return tx.Commit()
+		}()
+
+	}
+
+}
+
+func TestCoinTracker(t *testing.T) {
+	store := NewBlockStore(&chaincfg.MainNetParams)
+	startFrom := 153000
+	limit := 10_000
+
+	startingTransaction, err := chainhash.NewHashFromStr(
+		"c246c27e7bacc667d27ace253abf2bba82aa1e5fcd1d73e1b85863f6b890e1bf")
+	require.NoError(t, err)
+	txIndex := 1
+
+	nextOutput := &wire.OutPoint{
+		Hash:  *startingTransaction,
+		Index: uint32(txIndex),
+	}
+
+	var seen int
+
+	for {
+
+		blocks, err := store.ListBlocks(context.Background(), startFrom, limit)
+		require.NoError(t, err)
+
+		for _, b := range blocks {
+			//txLoop:
+			for _, tx := range b.Transactions {
+				for _, in := range tx.TxIn {
+					if in.PreviousOutPoint == *nextOutput {
+						seen++
+						var maxValue int64
+						var lastIdx int
+						for idx, out := range tx.TxOut {
+							if out.Value > maxValue {
+								maxValue = out.Value
+								lastIdx = idx
+							}
+						}
+
+						if maxValue == 0 {
+							return
+						}
+
+						nextOutput = &wire.OutPoint{
+							Hash:  tx.TxHash(),
+							Index: uint32(lastIdx),
+						}
+
+						if seen > 1 {
+							fmt.Println(
+								"=-=-=-=-\n",
+								btcutil.Amount(maxValue), "seen on", b.Header.Timestamp,
+								//"\nin block", b.Height,
+								"in tx", nextOutput.Hash.String(),
+								"\n============")
+						}
+					}
+				}
+			}
+		}
+		startFrom += limit + 1
+	}
+
+}
+
+func TestCoinTrackerV2(t *testing.T) {
+	store := NewBlockStore(&chaincfg.MainNetParams)
+	startFrom := 0
+	limit := 20_000
+
+	startingTransaction, err := chainhash.NewHashFromStr(
+		"c246c27e7bacc667d27ace253abf2bba82aa1e5fcd1d73e1b85863f6b890e1bf")
+	require.NoError(t, err)
+	txIndex := 1
+
+	nextOutput := &wire.OutPoint{
+		Hash:  *startingTransaction,
+		Index: uint32(txIndex),
+	}
+
+	var mu sync.RWMutex
+	var seen int
+
+	start := time.Now()
+	go func() {
+		for {
+			time.Sleep(time.Second)
+			mu.RLock()
+			p := seen
+			mu.RUnlock()
+			fmt.Println("processed", p,
+				"\nblocks per second", float64(p)/time.Since(start).Seconds())
+		}
+	}()
+
+	for {
+
+		blocks, err := store.ListLightBlocks(context.Background(), startFrom, limit)
+		require.NoError(t, err)
+		mu.Lock()
+		seen += len(blocks)
+		mu.Unlock()
+
+		if len(blocks) == 0 {
+			break
+		}
+		startFrom += limit
+		continue
+
+		for _, b := range blocks {
+			//txLoop:
+			for _, tx := range b.Transactions {
+				for _, in := range tx.Inputs {
+					if in == *nextOutput {
+						seen++
+						var maxValue int64
+						var lastIdx int
+						for idx, out := range tx.Outputs {
+							if out > maxValue {
+								maxValue = out
+								lastIdx = idx
+							}
+						}
+
+						if maxValue == 0 {
+							return
+						}
+
+						nextOutput = &wire.OutPoint{
+							Hash:  tx.Hash,
+							Index: uint32(lastIdx),
+						}
+
+						if seen > 1 {
+							fmt.Println(
+								"=-=-=-=-\n",
+								btcutil.Amount(maxValue), "seen in", b.Height,
+								//"\nin block", b.Height,
+								"in tx", nextOutput.Hash.String(),
+								"\n============")
+						}
+					}
+				}
+			}
+		}
+		startFrom += limit + 1
+	}
+
+}
+
+func TestCoinTrackerV3(t *testing.T) {
+	store := NewBlockStore(&chaincfg.MainNetParams)
+	startFrom := 0
+	limit := 20_000
+
+	var mu sync.RWMutex
+	var seen int
+
+	start := time.Now()
+	go func() {
+		for {
+			time.Sleep(time.Second)
+			mu.RLock()
+			p := seen
+			mu.RUnlock()
+			fmt.Println("processed", p,
+				"\nblocks per second", float64(p)/time.Since(start).Seconds())
+		}
+	}()
+
+	for {
+
+		blocks, err := store.ListBlocks(context.Background(), startFrom, limit)
+		require.NoError(t, err)
+		mu.Lock()
+		seen += len(blocks)
+		mu.Unlock()
+
+		if len(blocks) == 0 {
+			break
+		}
+		startFrom += limit
+		continue
+	}
+
+}
+
 func TestListBlocks(t *testing.T) {
 	store := NewBlockStore(&chaincfg.MainNetParams)
 
 	startFrom := 0
 	limit := 10_000
+
+	var totalOutputs int64
+	var totalTransactions int64
+	var maxTransactionOutputs int
+	var largestOutput int64
 
 	var mu sync.RWMutex
 	outputs := make(map[wire.OutPoint]int64)
@@ -67,6 +365,8 @@ func TestListBlocks(t *testing.T) {
 			blockHeight := atomic.LoadInt64(&bHeight)
 			mu.RLock()
 			total := len(outputs)
+			maxOutputs := maxTransactionOutputs
+			mostSpent := btcutil.Amount(largestOutput)
 			mu.RUnlock()
 			totalFees := atomic.LoadInt64(&blockFees)
 
@@ -75,9 +375,23 @@ func TestListBlocks(t *testing.T) {
 				blockHeight, "\n",
 				"fee total:", btcutil.Amount(totalFees),
 				"fee avg:", btcutil.Amount(totalFees/blockHeight),
+				"\n",
+				"total outputs", atomic.LoadInt64(&totalOutputs),
+				"\n",
+				"max output index", maxOutputs,
+				"\n most spent:", mostSpent,
+				"\n",
+				"total transactions", atomic.LoadInt64(&totalTransactions),
+				"\navg outputs per tx", fmt.Sprintf(
+					"%.2f",
+					float64(atomic.LoadInt64(&totalOutputs))/float64(atomic.LoadInt64(&totalTransactions))),
+				"\n=====\n",
 			)
 		}
 	}()
+
+	amt, err := btcutil.NewAmount(500000)
+	require.NoError(t, err)
 
 	for {
 		results, err := store.ListBlocks(context.Background(), startFrom, limit)
@@ -90,12 +404,18 @@ func TestListBlocks(t *testing.T) {
 		for _, r := range results {
 			var totalFee int64
 			atomic.StoreInt64(&bHeight, int64(r.Height))
+			var coinbaseKey wire.OutPoint
 			for txIdx, tx := range r.Transactions {
+				atomic.AddInt64(&totalTransactions, 1)
 				var txFee int64
 				_ = tx
 				hash := tx.TxHash()
 				//atomic.AddInt64(&total, 1)
 				mu.Lock()
+				outputLength := len(tx.TxOut)
+				if outputLength > maxTransactionOutputs {
+					maxTransactionOutputs = outputLength
+				}
 				for _, input := range tx.TxIn {
 					if txIdx > 0 {
 						txFee += outputs[input.PreviousOutPoint]
@@ -105,20 +425,37 @@ func TestListBlocks(t *testing.T) {
 				}
 
 				for idx, out := range tx.TxOut {
-					outputs[wire.OutPoint{
+					key := wire.OutPoint{
 						Hash:  hash,
 						Index: uint32(idx),
-					}] = out.Value
+					}
+					outputs[key] = out.Value
+					if txIdx == 0 {
+						coinbaseKey = key
+					}
+					if out.Value > largestOutput {
+						largestOutput = out.Value
+						if btcutil.Amount(out.Value) >= amt {
+							mu.Unlock()
+							fmt.Println("max value in block", r.Height,
+								"\n", "of transaction", tx.TxHash(),
+								"\nat output idx", idx,
+								"\ntx idx", txIdx)
+							return
+						}
+					}
 
 					if txIdx > 0 {
 						txFee -= out.Value
 					}
+					atomic.AddInt64(&totalOutputs, 1)
 
 				}
 				mu.Unlock()
 				totalFee += txFee
 
 			}
+			outputs[coinbaseKey] += totalFee
 
 			//fmt.Println(r.Height, "block fee", btcutil.Amount(totalFee))
 			atomic.AddInt64(&blockFees, totalFee)

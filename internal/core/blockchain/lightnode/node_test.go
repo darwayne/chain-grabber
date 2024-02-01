@@ -20,7 +20,6 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -115,30 +114,6 @@ func TestSQLITEBlockRead(t *testing.T) {
 	t.Log(len(block.Transactions))
 }
 
-func TestTestNet(t *testing.T) {
-	node, err := NewTestNet()
-	require.NoError(t, err)
-
-	go func() {
-		for {
-			select {
-			case peer := <-node.peerConnected:
-				data := node.GetPeerData(peer)
-				fmt.Println("node connected", atomic.LoadInt64(&node.connectedPeers),
-					"\tversionLatency:", data.versionLatency)
-			}
-		}
-	}()
-	node.Connect()
-	require.NotEmpty(t, node.initialPeers)
-
-	node.PopulateHeaders()
-	select {
-	case <-node.Done():
-		time.Sleep(time.Second)
-	}
-}
-
 func TestChunkSlice(t *testing.T) {
 	var arr []int
 	for i := 0; i < 100; i++ {
@@ -148,29 +123,6 @@ func TestChunkSlice(t *testing.T) {
 	chunked := ChunkSlice(arr, 50)
 	length := len(chunked)
 	require.Equal(t, 2, length)
-}
-
-func TestMainNet(t *testing.T) {
-	node, err := NewMainNet()
-	require.NoError(t, err)
-	go func() {
-		for {
-			select {
-			case peer := <-node.peerConnected:
-				data := node.GetPeerData(peer)
-				fmt.Println("node connected", atomic.LoadInt64(&node.connectedPeers),
-					"\tversionLatency:", data.versionLatency)
-			}
-		}
-	}()
-	node.Connect()
-	require.NotEmpty(t, node.initialPeers)
-
-	node.PopulateHeaders()
-	select {
-	case <-node.Done():
-		time.Sleep(time.Second)
-	}
 }
 
 func TestNet(t *testing.T) {

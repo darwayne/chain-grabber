@@ -549,10 +549,10 @@ func TestFillMissingBlocks(t *testing.T) {
 	t.Log(len(dataToSend), "missing blocks")
 
 	select {
-	case peer := <-node.peerConnected:
+	case peer := <-node.OnPeerConnected:
 		peerQueue <- peer
 		data := node.GetPeerData(peer)
-		fmt.Println("connected to", peer, "\tlatency:", data.versionLatency)
+		fmt.Println("connected to", peer, "\tlatency:", data.VersionLatency)
 	case <-time.After(30 * time.Second):
 		t.Fatal("no peers detected")
 	}
@@ -638,7 +638,7 @@ func TestFillMissingBlocks(t *testing.T) {
 					}
 
 					select {
-					case <-pData.connected:
+					case <-pData.Connected:
 					case <-time.After(10 * time.Second):
 						blockReqChan <- hashes
 						continue
@@ -658,7 +658,7 @@ func TestFillMissingBlocks(t *testing.T) {
 							"adding", len(hashes), "blocks back to the queue")
 						blockReqChan <- hashes
 						continue
-					case b := <-pData.onBlock:
+					case b := <-pData.OnBlock:
 						//t.Log("got block from peer")
 						onPeerBlock <- b
 						match := b.BlockHash()
@@ -686,13 +686,13 @@ func TestFillMissingBlocks(t *testing.T) {
 			select {
 			case peer := <-peerQueue:
 				go newWorker(peer)
-			case peer := <-node.peerConnected:
+			case peer := <-node.OnPeerConnected:
 				peerQueue <- peer
 				data := node.GetPeerData(peer)
 				if data == nil {
 					continue
 				}
-				fmt.Println("connected to", peer, "\tlatency:", data.versionLatency)
+				fmt.Println("connected to", peer, "\tlatency:", data.VersionLatency)
 			}
 		}
 	}()
@@ -757,7 +757,7 @@ func TestUpdateBlockHeights(t *testing.T) {
 		}
 		for {
 			select {
-			case <-pData.disconnected:
+			case <-pData.Disconnected:
 				return
 			case req := <-headerReq:
 				mu.RLock()
@@ -770,7 +770,7 @@ func TestUpdateBlockHeights(t *testing.T) {
 				}
 
 				select {
-				case msg := <-pData.onHeaders:
+				case msg := <-pData.OnHeaders:
 					newChunk := make([]BlockHeight, 0)
 
 					for _, header := range msg.Headers {
@@ -832,12 +832,12 @@ func TestUpdateBlockHeights(t *testing.T) {
 	go func() {
 		for {
 			select {
-			case peer := <-node.peerConnected:
+			case peer := <-node.OnPeerConnected:
 				data := node.GetPeerData(peer)
 				if data == nil {
 					continue
 				}
-				log.Println("connected to", peer, "latency", data.versionLatency)
+				log.Println("connected to", peer, "latency", data.VersionLatency)
 				go newWorker(peer)
 			}
 		}

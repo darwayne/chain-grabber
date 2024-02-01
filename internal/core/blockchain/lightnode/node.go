@@ -1,10 +1,7 @@
 package lightnode
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
-	"database/sql"
 	"fmt"
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg"
@@ -27,35 +24,40 @@ import (
 	"time"
 )
 
-type netDialer func(network, addr string) (c net.Conn, err error)
 type Node struct {
-	ctx              context.Context
-	dialer           proxy.Dialer
-	chain            *chaincfg.Params
-	peerConnected    chan *peer.Peer
-	peerDisconnected chan *peer.Peer
-	onPeerInv        chan PeerInv
-	onPeerBlock      chan PeerBlock
-	onPeerHeaders    chan PeerHeaders
-	peers            map[*peer.Peer]*peerData
-	mu               sync.RWMutex
-	connected        bool
-	connectedPeers   int64
-	initialPeers     map[string]struct{}
-	peerIdx          int
+	ctx                context.Context
+	dialer             proxy.Dialer
+	chain              *chaincfg.Params
+	OnPeerConnected    chan *peer.Peer
+	OnPeerDisconnected chan *peer.Peer
+	OnPeerInv          chan PeerInv
+	OnPeerBlock        chan PeerBlock
+	OnPeerHeaders      chan PeerHeaders
+	peers              map[*peer.Peer]*PeerData
+	mu                 sync.RWMutex
+	connected          bool
+	connectedPeers     int64
+	initialPeers       map[string]struct{}
+	peerIdx            int
+	MaxPeers           int
+	headerMu           sync.RWMutex
+	Headers            []wire.BlockHeader
+	MaxHeaders         int
 }
 
-type peerData struct {
-	connected      chan struct{}
-	disconnected   chan struct{}
-	onHeaders      chan *wire.MsgHeaders
-	onInvoice      chan *wire.MsgInv
-	onBlock        chan *wire.MsgBlock
-	onGetData      chan *wire.MsgGetData
-	sent           int64
-	received       int64
-	versionLatency time.Duration
-	manuallySent   int64
+type PeerData struct {
+	Connected        chan struct{}
+	Disconnected     chan struct{}
+	OnHeaders        chan *wire.MsgHeaders
+	OnGetHeaders     chan *wire.MsgGetHeaders
+	OnInvoice        chan *wire.MsgInv
+	OnTX             chan *wire.MsgTx
+	OnBlock          chan *wire.MsgBlock
+	OnGetData        chan *wire.MsgGetData
+	MessagesSent     int64
+	MessagesReceived int64
+	VersionLatency   time.Duration
+	manuallySent     int64
 }
 
 func NewTestNet() (*Node, error) {
@@ -96,30 +98,30 @@ func NewNode(dialer proxy.Dialer, chain *chaincfg.Params) *Node {
 		cancel()
 	}()
 	return &Node{
-		ctx:              ctx,
-		dialer:           dialer,
-		chain:            chain,
-		peers:            make(map[*peer.Peer]*peerData),
-		initialPeers:     make(map[string]struct{}),
-		peerConnected:    make(chan *peer.Peer, 100),
-		peerDisconnected: make(chan *peer.Peer, 100),
-		onPeerBlock:      make(chan PeerBlock, 100),
-		onPeerHeaders:    make(chan PeerHeaders, 100),
-		onPeerInv:        make(chan PeerInv, 100),
+		ctx:                ctx,
+		dialer:             dialer,
+		chain:              chain,
+		peers:              make(map[*peer.Peer]*PeerData),
+		initialPeers:       make(map[string]struct{}),
+		OnPeerConnected:    make(chan *peer.Peer, 100),
+		OnPeerDisconnected: make(chan *peer.Peer, 100),
+		OnPeerBlock:        make(chan PeerBlock, 100),
+		OnPeerHeaders:      make(chan PeerHeaders, 100),
+		OnPeerInv:          make(chan PeerInv, 100),
 	}
 }
 
 func (n *Node) ConnectV2() {
 	connmgr.SeedFromDNS(n.chain,
 		wire.SFNodeNetwork, net.LookupIP, func(addrs []*wire.NetAddressV2) {
-			fmt.Println("got", len(addrs), "from dns")
+			log.Println("got", len(addrs), "from dns")
 			for _, addr := range addrs {
 				if strings.Contains(addr.Addr.String(), ":") {
-					//fmt.Println("skipping address", addr)
+					//log.Println("skipping address", addr)
 					//continue
 				}
 
-				//fmt.Println("adding", addr.Addr, "to list")
+				//log.Println("adding", addr.Addr, "to list")
 
 				connectionAddr := fmt.Sprintf("%s:%d", addr.Addr.String(), addr.Port)
 				go n.connectPeer(connectionAddr)
@@ -130,23 +132,23 @@ func (n *Node) ConnectV2() {
 
 func (n *Node) Connect() {
 	//n.mu.Lock()
-	//if n.connected {
+	//if n.Connected {
 	//	n.mu.Unlock()
 	//	return
 	//}
 	//
-	//n.connected = true
+	//n.Connected = true
 	//n.mu.Unlock()
 	wait := make(chan struct{}, 1)
 	connmgr.SeedFromDNS(n.chain,
 		wire.SFNodeNetwork, net.LookupIP, func(addrs []*wire.NetAddressV2) {
 			for _, addr := range addrs {
 				if strings.Contains(addr.Addr.String(), ":") {
-					fmt.Println("skipping address", addr)
+					log.Println("skipping address", addr)
 					continue
 				}
 
-				fmt.Println("adding", addr.Addr, "to list")
+				log.Println("adding", addr.Addr, "to list")
 
 				n.mu.Lock()
 				n.initialPeers[fmt.Sprintf("%s:%d", addr.Addr.String(), addr.Port)] = struct{}{}
@@ -186,7 +188,7 @@ func (n *Node) newestBlock() (*chainhash.Hash, int32, error) {
 	return n.chain.GenesisHash, 1, nil
 }
 
-func (n *Node) GetPeerData(p *peer.Peer) *peerData {
+func (n *Node) GetPeerData(p *peer.Peer) *PeerData {
 	n.mu.RLock()
 	data, found := n.peers[p]
 	n.mu.RUnlock()
@@ -205,7 +207,7 @@ func (n *Node) SendTransactionToPeer(ctx context.Context, peer *peer.Peer, tx *w
 	var msg wire.MsgInv
 
 	hash := tx.TxHash()
-	err := msg.AddInvVect(wire.NewInvVect(wire.InvTypeTx, &hash))
+	err := msg.AddInvVect(wire.NewInvVect(wire.InvTypeWitnessTx, &hash))
 	if err != nil {
 		return err
 	}
@@ -215,9 +217,10 @@ func (n *Node) SendTransactionToPeer(ctx context.Context, peer *peer.Peer, tx *w
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case req := <-info.onGetData:
+		case req := <-info.OnGetData:
 			for _, inv := range req.InvList {
-				if inv.Type != wire.InvTypeTx || inv.Hash != hash {
+				log.Println(inv.Type, inv.Hash, "inv requested from", peer)
+				if !((inv.Type == wire.InvTypeTx || inv.Type == wire.InvTypeWitnessTx) && inv.Hash == hash) {
 					continue
 				}
 				peer.QueueMessage(tx, nil)
@@ -231,9 +234,124 @@ func (n *Node) TotalPeers() int64 {
 	return atomic.LoadInt64(&n.connectedPeers)
 }
 
+func (n *Node) handeHeaders(p *peer.Peer) {
+	data := n.GetPeerData(p)
+	if data == nil {
+		log.Println("no data detected")
+		return
+	}
+	maxHeaders := n.MaxHeaders
+	if maxHeaders == 0 {
+		maxHeaders = 100
+	}
+
+	n.headerMu.RLock()
+	headerSize := len(n.Headers)
+	n.headerMu.RUnlock()
+	if headerSize == 0 {
+		var hash *chainhash.Hash
+		if n.chain == &chaincfg.MainNetParams {
+			hash, _ = chainhash.NewHashFromStr("0000000000000000000393398b854ef335316e882ba041cf5a10013ec7b7de22")
+		} else {
+			hash, _ = chainhash.NewHashFromStr("0000000000000014e2245b613b729216524228d84f01e62ee17f602ea2654c2c")
+		}
+		p.PushGetHeadersMsg(blockchain.BlockLocator{hash}, &chainhash.Hash{})
+	}
+
+	for {
+		select {
+		case <-n.Done():
+			return
+		case <-data.Disconnected:
+			return
+		case req := <-data.OnBlock:
+			fmt.Println("got block", req.BlockHash())
+			n.headerMu.Lock()
+			if len(n.Headers) == 0 {
+				n.headerMu.Unlock()
+				continue
+			}
+
+			lastHeader := n.Headers[len(n.Headers)-1]
+			if req.Header.PrevBlock == lastHeader.BlockHash() {
+				n.Headers = append(n.Headers, req.Header)
+			}
+			if len(n.Headers) > maxHeaders {
+				fmt.Println("adding block to headers")
+				n.Headers = n.Headers[len(n.Headers)-maxHeaders:]
+			}
+			n.headerMu.Unlock()
+		case req := <-data.OnGetHeaders:
+			n.headerMu.RLock()
+			copied := make([]*wire.BlockHeader, 0, len(n.Headers))
+			for _, header := range n.Headers {
+				header := header
+				copied = append(copied, &header)
+			}
+			n.headerMu.RUnlock()
+
+			msg := wire.NewMsgHeaders()
+			startFrom := 0
+			stopAt := len(copied)
+			for idx, c := range copied {
+				if len(req.BlockLocatorHashes) == 0 {
+					break
+				}
+				hash := req.BlockLocatorHashes[0]
+				if *hash == c.PrevBlock {
+					startFrom = idx
+				}
+				if req.HashStop == c.BlockHash() {
+					stopAt = idx
+					break
+				}
+			}
+
+			for _, c := range copied[startFrom:stopAt] {
+				msg.AddBlockHeader(c)
+			}
+
+			p.QueueMessage(msg, nil)
+
+		case req := <-data.OnHeaders:
+			if len(req.Headers) == 0 {
+				continue
+			}
+			n.headerMu.Lock()
+			var updated bool
+			if len(n.Headers) == 0 {
+				n.Headers = append(n.Headers, *req.Headers[0])
+				updated = true
+			}
+
+			lastHeader := n.Headers[len(n.Headers)-1]
+			for _, header := range req.Headers {
+				if header.PrevBlock != lastHeader.BlockHash() {
+					continue
+				}
+
+				n.Headers = append(n.Headers, *header)
+				updated = true
+				lastHeader = n.Headers[len(n.Headers)-1]
+			}
+			if len(n.Headers) > maxHeaders {
+				n.Headers = n.Headers[len(n.Headers)-maxHeaders:]
+			}
+			total := len(n.Headers)
+			n.headerMu.Unlock()
+			if updated {
+				fmt.Println("headers updated", total)
+				hash := lastHeader.BlockHash()
+				p.PushGetHeadersMsg(blockchain.BlockLocator{&hash}, &chainhash.Hash{})
+			}
+
+		}
+	}
+}
+
 func (n *Node) connectPeer(addr string) (e error) {
 	atomic.AddInt64(&n.connectedPeers, 1)
-	if n.TotalPeers() > 100 {
+	if n.TotalPeers() > int64(n.MaxPeers) && n.MaxPeers > 0 {
 		atomic.AddInt64(&n.connectedPeers, -1)
 		return
 	}
@@ -251,22 +369,25 @@ func (n *Node) connectPeer(addr string) (e error) {
 	}
 	n.initialPeers[addr] = struct{}{}
 	n.mu.Unlock()
-	data := &peerData{
-		connected:    make(chan struct{}),
-		disconnected: make(chan struct{}),
-		onHeaders:    make(chan *wire.MsgHeaders, 1),
-		onInvoice:    make(chan *wire.MsgInv, 1),
-		onBlock:      make(chan *wire.MsgBlock, 1),
-		onGetData:    make(chan *wire.MsgGetData),
+	data := &PeerData{
+		Connected:    make(chan struct{}),
+		Disconnected: make(chan struct{}),
+		OnHeaders:    make(chan *wire.MsgHeaders, 1),
+		OnInvoice:    make(chan *wire.MsgInv, 1),
+		OnBlock:      make(chan *wire.MsgBlock, 1),
+		OnGetData:    make(chan *wire.MsgGetData, 1),
+		OnGetHeaders: make(chan *wire.MsgGetHeaders, 1),
+		OnTX:         make(chan *wire.MsgTx, 1),
 	}
 	var versionTime time.Time
 	p, err := peer.NewOutboundPeer(&peer.Config{
-		ChainParams: n.chain,
-		NewestBlock: n.newestBlock,
-		Services:    wire.SFNodeNetwork | wire.SFNodeNetworkLimited,
+		ChainParams:     n.chain,
+		TrickleInterval: 500 * time.Millisecond,
+		//NewestBlock: n.newestBlock,
+		Services: wire.SFNodeNetwork,
 		Listeners: peer.MessageListeners{
 			OnAddr: func(p *peer.Peer, msg *wire.MsgAddr) {
-				//fmt.Println("got v1 addresses", len(msg.AddrList))
+				//log.Println("got v1 addresses", len(msg.AddrList))
 				for _, a := range msg.AddrList {
 					if a.IP.To4() == nil {
 						continue
@@ -290,13 +411,13 @@ func (n *Node) connectPeer(addr string) (e error) {
 			},
 			OnGetData: func(p *peer.Peer, msg *wire.MsgGetData) {
 				select {
-				case data.onGetData <- msg:
+				case data.OnGetData <- msg:
 				default:
 
 				}
 			},
 			OnAddrV2: func(p *peer.Peer, msg *wire.MsgAddrV2) {
-				//fmt.Println("got v2 addresses", len(msg.AddrList))
+				//log.Println("got v2 addresses", len(msg.AddrList))
 				for _, a := range msg.AddrList {
 					if strings.Contains(a.Addr.String(), ":") {
 						continue
@@ -322,47 +443,73 @@ func (n *Node) connectPeer(addr string) (e error) {
 				versionTime = time.Now()
 				return nil
 			},
-			OnVerAck: func(p *peer.Peer, msg *wire.MsgVerAck) {
-				data.versionLatency = time.Since(versionTime)
-				close(data.connected)
+			OnTx: func(p *peer.Peer, msg *wire.MsgTx) {
 				select {
-				case n.peerConnected <- p:
+				case data.OnTX <- msg:
+				default:
+
+				}
+				//log.Println("got transaction", msg.TxHash())
+			},
+			OnVerAck: func(p *peer.Peer, msg *wire.MsgVerAck) {
+				data.VersionLatency = time.Since(versionTime)
+				close(data.Connected)
+				select {
+				case n.OnPeerConnected <- p:
 				case <-n.ctx.Done():
 				default:
 
 				}
+
+				go n.handeHeaders(p)
 
 				p.QueueMessage(&wire.MsgGetAddr{}, nil)
 			},
 			OnHeaders: func(p *peer.Peer, msg *wire.MsgHeaders) {
 				select {
-				case n.onPeerHeaders <- PeerHeaders{Peer: p, MsgHeaders: msg}:
+				case n.OnPeerHeaders <- PeerHeaders{Peer: p, MsgHeaders: msg}:
 				case <-n.ctx.Done():
 				default:
 				}
 				select {
-				case data.onHeaders <- msg:
+				case data.OnHeaders <- msg:
 				case <-n.ctx.Done():
 				default:
 					log.Println("skipped local headers message", p)
 				}
 			},
 			OnInv: func(p *peer.Peer, msg *wire.MsgInv) {
+				//log.Println(len(msg.InvList), "invoices received from", p)
+				//go func() {
+				//	for _, inv := range msg.InvList {
+				//		log.Println(inv.Type, inv.Hash, "invoice from", p)
+				//	}
+				//}()
 				select {
-				case n.onPeerInv <- PeerInv{Peer: p, MsgInv: msg}:
+				case n.OnPeerInv <- PeerInv{Peer: p, MsgInv: msg}:
 				case <-n.ctx.Done():
 				default:
 				}
 				select {
-				case data.onInvoice <- msg:
+				case data.OnInvoice <- msg:
 				case <-n.ctx.Done():
 				default:
 				}
 			},
+			OnGetHeaders: func(p *peer.Peer, msg *wire.MsgGetHeaders) {
+				select {
+				case data.OnGetHeaders <- msg:
+				case <-n.Done():
+				default:
+				}
+			},
+			OnSendHeaders: func(p *peer.Peer, msg *wire.MsgSendHeaders) {
+				//log.Println("wants my latest headers", p)
+			},
 			OnBlock: func(p *peer.Peer, msg *wire.MsgBlock, buf []byte) {
 				//log.Println("received block from", p, "hash:", msg.BlockHash())
 				select {
-				case n.onPeerBlock <- PeerBlock{Peer: p, MsgBlock: msg}:
+				case n.OnPeerBlock <- PeerBlock{Peer: p, MsgBlock: msg}:
 					//log.Println("sent block to global channel", p, "hash:", msg.BlockHash())
 				case <-n.ctx.Done():
 				default:
@@ -370,7 +517,7 @@ func (n *Node) connectPeer(addr string) (e error) {
 					//log.Println("block skipped global channel", p, "hash:", msg.BlockHash())
 				}
 				select {
-				case data.onBlock <- msg:
+				case data.OnBlock <- msg:
 					//log.Println("sent block to local channel", p, "hash:", msg.BlockHash())
 				case <-n.ctx.Done():
 				default:
@@ -381,15 +528,15 @@ func (n *Node) connectPeer(addr string) (e error) {
 
 			},
 			OnReject: func(p *peer.Peer, msg *wire.MsgReject) {
-				fmt.Println("got reject of", msg.Hash, msg.Reason)
+				//log.Println("got reject of", msg.Hash, msg.Reason)
 			},
 			OnRead: func(p *peer.Peer, bytesRead int, msg wire.Message, err error) {
-				log.Println("read message", getMessageCommand(msg), "from", p)
-				atomic.AddInt64(&data.received, 1)
+				//log.Println("read message", getMessageCommand(msg), "from", p)
+				atomic.AddInt64(&data.MessagesReceived, 1)
 			},
 			OnWrite: func(p *peer.Peer, bytesWritten int, msg wire.Message, err error) {
-				log.Println("wrote message", getMessageCommand(msg), "to", p)
-				atomic.AddInt64(&data.received, 1)
+				//log.Println("wrote message", getMessageCommand(msg), "to", p)
+				atomic.AddInt64(&data.MessagesReceived, 1)
 			},
 		},
 	}, addr)
@@ -417,13 +564,13 @@ func (n *Node) connectPeer(addr string) (e error) {
 	}()
 	go func() {
 		p.WaitForDisconnect()
-		close(data.disconnected)
+		close(data.Disconnected)
 		atomic.AddInt64(&n.connectedPeers, -1)
 		n.mu.Lock()
 		delete(n.peers, p)
 		n.mu.Unlock()
 		select {
-		case n.peerDisconnected <- p:
+		case n.OnPeerDisconnected <- p:
 		case <-n.ctx.Done():
 		default:
 		}
@@ -456,263 +603,6 @@ func (n *Node) GetPeer() *peer.Peer {
 	}
 
 	return peers[idx]
-}
-
-func (n *Node) PopulateHeaders() {
-	if 1 == 1 {
-		return
-		// TODO: all the logic below should live somewhere else
-		// 	node should just be a node
-	}
-	n.mu.RLock()
-	peers := maps.Clone(n.peers)
-	n.mu.RUnlock()
-	totalPeers := len(peers)
-	fmt.Println("populating headers", len(peers), "connected")
-	if totalPeers == 0 {
-		n.mu.Lock()
-		n.connected = false
-		n.mu.Unlock()
-		go func() {
-			n.Connect()
-			n.PopulateHeaders()
-		}()
-
-		fmt.Println("no peers detected ... re-connecting")
-
-		return
-	}
-
-	var mu sync.RWMutex
-	headerMsg := make(chan struct{})
-	var blocks []chainhash.Hash //[]chainhash.Hash
-	knownHashes := make(map[chainhash.Hash]struct{})
-	blocks = append(blocks, *n.chain.GenesisHash)
-	knownHashes[*n.chain.GenesisHash] = struct{}{}
-
-	go func() {
-
-		for {
-			select {
-			case <-headerMsg:
-			case <-time.After(5 * time.Second):
-				fmt.Println("no header message seen .. resending")
-				mu.RLock()
-				lastBlock := blocks[len(blocks)-1]
-				mu.RUnlock()
-
-				n.GetPeer().PushGetHeadersMsg(blockchain.BlockLocator{&lastBlock}, &chainhash.Hash{})
-			}
-		}
-	}()
-
-	folder := "./storedblocks"
-	if n.chain == &chaincfg.MainNetParams {
-		folder += "/mainnet/"
-	} else {
-		folder += "/testnet/"
-	}
-	folder += "blocks.sqlite"
-
-	db, err := sql.Open("sqlite3", folder+"?journal_mode=WAL")
-	if err != nil {
-		log.Fatalln(err)
-	}
-	go func() {
-		select {
-		case <-n.ctx.Done():
-			db.Close()
-		}
-	}()
-
-	const create string = `
-  CREATE TABLE IF NOT EXISTS blocks (
-  hash text NOT NULL PRIMARY KEY,
-  data BLOB NOT NULL
-  );`
-
-	_, err = db.Exec(create)
-	if err != nil {
-		log.Fatalln("error setting up sqlite", err)
-	}
-
-	blockChan := make(chan chainhash.Hash, 1)
-	go func() {
-		var blockMu sync.RWMutex
-		blocksToFetch := make(map[chainhash.Hash]struct{})
-
-		go func() {
-			pendingBlocks := make(map[chainhash.Hash]struct{})
-			myBlocks := make(map[chainhash.Hash]*wire.MsgBlock)
-
-			//var lastPurge = time.Now()
-			work := func() {
-
-				if len(myBlocks) > 1 { //} && time.Since(lastPurge) > time.Minute {
-					start := time.Now()
-					fmt.Println("flushing blocks to disk")
-					maxToPurge := 0
-					tx, err := db.Begin()
-					if err != nil {
-						log.Fatalln("error opening transaction", err)
-					}
-					defer tx.Commit()
-					stmt, err := tx.PrepareContext(n.ctx, `INSERT OR IGNORE into blocks VALUES(?, ?)`)
-					if err != nil {
-						log.Fatalln("error opening statement", err)
-					}
-					defer stmt.Close()
-					for hash, block := range myBlocks {
-						maxToPurge++
-
-						err := func() error {
-							f := new(bytes.Buffer)
-							writer, err := gzip.NewWriterLevel(f, gzip.BestCompression)
-							if err != nil {
-								return err
-							}
-
-							if err := block.Serialize(writer); err != nil {
-								return err
-							}
-							writer.Close()
-							_, err = stmt.ExecContext(
-								n.ctx,
-								hash.String(), f.String())
-
-							return err
-						}()
-
-						if err != nil {
-							log.Fatalln("error writing block", err)
-						}
-						delete(myBlocks, hash)
-
-					}
-
-					//lastPurge = time.Now()
-					log.Println(maxToPurge, "blocks flushed to disk", time.Since(start))
-
-				}
-
-				invoices := make([]*wire.InvVect, 0, len(pendingBlocks))
-
-				for hash := range pendingBlocks {
-					hash := hash
-					invoices = append(invoices, wire.NewInvVect(wire.InvTypeBlock, &hash))
-				}
-				for _, chunk := range ChunkSlice(invoices, 100) {
-					chunk := chunk
-					data := wire.NewMsgGetData()
-					data.InvList = chunk
-					n.GetPeer().QueueMessage(data, nil)
-				}
-
-			}
-			for {
-				select {
-				case block := <-n.onPeerBlock:
-					hash := block.BlockHash()
-					delete(pendingBlocks, hash)
-					blockMu.Lock()
-					delete(blocksToFetch, hash)
-					blockMu.Unlock()
-					myBlocks[hash] = block.MsgBlock
-					//fmt.Println("got block", hash)
-				case <-time.After(time.Second):
-					blockMu.RLock()
-					toFetch := len(blocksToFetch)
-					blockMu.RUnlock()
-					log.Println(len(myBlocks), "blocks saved ..", toFetch, "more remaining")
-					maxPending := 20000
-					if len(pendingBlocks) < maxPending {
-						blockMu.RLock()
-					innerLoop:
-						for hash := range blocksToFetch {
-							if len(pendingBlocks) < maxPending {
-								pendingBlocks[hash] = struct{}{}
-							} else {
-								break innerLoop
-							}
-						}
-						blockMu.RUnlock()
-					}
-					work()
-				}
-			}
-		}()
-		for {
-			select {
-			case hash := <-blockChan:
-				blockMu.Lock()
-				blocksToFetch[hash] = struct{}{}
-				blockMu.Unlock()
-			}
-		}
-	}()
-
-	mu.RLock()
-	lastBlock := blocks[len(blocks)-1]
-	mu.RUnlock()
-	n.GetPeer().PushGetHeadersMsg(blockchain.BlockLocator{&lastBlock}, &chainhash.Hash{})
-	//p := n.GetPeer()
-	//fmt.Println("sending blocks msg to", p.Addr())
-	//p.PushGetBlocksMsg(blockchain.BlockLocator{n.chain.GenesisHash}, &chainhash.Hash{})
-	go func() {
-		for {
-			select {
-			case msg := <-n.onPeerInv:
-				addr := msg.Peer.Addr()
-				_ = addr
-
-				hashes := make([]chainhash.Hash, 0, 500)
-				for _, inv := range msg.InvList {
-					if inv.Type != wire.InvTypeBlock {
-						//fmt.Println("skipping", inv.Type, addr)
-						continue
-					}
-					//n.GetPeer().PushGetHeadersMsg()
-					hashes = append(hashes, inv.Hash)
-				}
-
-				if len(hashes) > 0 {
-					//fmt.Println("got peer invoice", len(msg.InvList), addr, len(hashes))
-					n.GetPeer().PushGetHeadersMsg(blockchain.BlockLocator{&hashes[0]}, &chainhash.Hash{})
-				}
-			case msg := <-n.onPeerHeaders:
-				select {
-				case headerMsg <- struct{}{}:
-				default:
-
-				}
-				for _, header := range msg.Headers {
-					hash := header.BlockHash()
-
-					_, found := knownHashes[hash]
-					_, valid := knownHashes[header.PrevBlock]
-					if found || !valid {
-						//fmt.Println("skipping known or invalid hash", hash)
-						continue
-					}
-
-					mu.Lock()
-					blocks = append(blocks, hash)
-					mu.Unlock()
-					knownHashes[hash] = struct{}{}
-					blockChan <- hash
-				}
-				mu.RLock()
-				lastIdx := len(blocks) - 1
-				mu.RUnlock()
-				lastBlock := blocks[lastIdx]
-
-				//fmt.Println(lastIdx+1, "total blocks")
-				n.GetPeer().PushGetHeadersMsg(blockchain.BlockLocator{&lastBlock}, &chainhash.Hash{})
-
-			}
-		}
-	}()
-
 }
 
 type PeerInv struct {

@@ -18,13 +18,42 @@ import (
 type Defender struct {
 	mu                   sync.RWMutex
 	transactionsToIgnore map[chainhash.Hash]TransactionInfo
-	inputsToMonitor      map[wire.OutPoint]*chainhash.Hash
+	inputsToMonitor      MonitoredOutPoint
+}
+
+type MonitoredOutPoint map[chainhash.Hash]map[uint32]*chainhash.Hash
+
+func (m MonitoredOutPoint) Add(point wire.OutPoint, hash *chainhash.Hash) {
+	if m[point.Hash] == nil {
+		m[point.Hash] = make(map[uint32]*chainhash.Hash)
+	}
+	m[point.Hash][point.Index] = hash
+}
+
+func (m MonitoredOutPoint) Remove(point wire.OutPoint) {
+	if m[point.Hash] == nil {
+		m[point.Hash] = make(map[uint32]*chainhash.Hash)
+	}
+	delete(m[point.Hash], point.Index)
+	if len(m[point.Hash]) == 0 {
+		delete(m, point.Hash)
+	}
+}
+
+func (m MonitoredOutPoint) Hash(point wire.OutPoint) *chainhash.Hash {
+	if m[point.Hash] == nil {
+		return nil
+	}
+
+	for _, hash := range m[point.Hash] {
+		return hash
+	}
+
+	return nil
 }
 
 type TransactionInfo struct {
-	FirstSeen    time.Time
 	CompressedTX []byte
-	Outpoints    map[wire.OutPoint]struct{}
 }
 
 func (t TransactionInfo) Tx() (*wire.MsgTx, error) {
@@ -45,7 +74,7 @@ func (t TransactionInfo) Tx() (*wire.MsgTx, error) {
 func New() *Defender {
 	return &Defender{
 		transactionsToIgnore: make(map[chainhash.Hash]TransactionInfo),
-		inputsToMonitor:      make(map[wire.OutPoint]*chainhash.Hash),
+		inputsToMonitor:      make(MonitoredOutPoint),
 	}
 }
 
@@ -54,7 +83,7 @@ func (d *Defender) Defended(tx *wire.MsgTx) {
 	defer d.mu.Unlock()
 	delete(d.transactionsToIgnore, tx.TxHash())
 	for _, in := range tx.TxIn {
-		delete(d.inputsToMonitor, in.PreviousOutPoint)
+		d.inputsToMonitor.Remove(in.PreviousOutPoint)
 	}
 }
 
@@ -70,15 +99,16 @@ func (d *Defender) Defend(tx *wire.MsgTx) error {
 
 	info := TransactionInfo{
 		CompressedTX: buff.Bytes(),
-		Outpoints:    make(map[wire.OutPoint]struct{}, len(tx.TxIn)),
 	}
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	hash := tx.TxHash()
 	for _, in := range tx.TxIn {
-		info.Outpoints[in.PreviousOutPoint] = struct{}{}
-		d.inputsToMonitor[in.PreviousOutPoint] = &hash
+		if d.inputsToMonitor[in.PreviousOutPoint.Hash] == nil {
+			d.inputsToMonitor[in.PreviousOutPoint.Hash] = make(map[uint32]*chainhash.Hash)
+		}
+		d.inputsToMonitor.Add(in.PreviousOutPoint, &hash)
 	}
 	d.transactionsToIgnore[hash] = info
 	fmt.Println(hash.String(), "is being monitored", len(d.inputsToMonitor), "outpoints monitored")
@@ -92,7 +122,7 @@ func (d *Defender) Start(node *lightnode.Node, broadcastClients []*broadcaster.E
 	for idx := range broadcastClients {
 		cli := broadcastClients[idx]
 		go func() {
-			ticker := time.NewTicker(30 * time.Second)
+			ticker := time.NewTicker(10 * time.Second)
 			sub := broker.Subscribe()
 			for {
 				select {
@@ -102,8 +132,12 @@ func (d *Defender) Start(node *lightnode.Node, broadcastClients []*broadcaster.E
 					tx, err := cli.Broadcast(*msg)
 					fmt.Println("broadcast result:", tx, err)
 				case <-ticker.C:
-					result, err := cli.Ping()
-					fmt.Println("sending ping to", cli.Server, result, err)
+					_, err := cli.Ping()
+					if err != nil {
+						fmt.Println("error pinging reconnecting to", cli.Server)
+						cli.Reconnect()
+					}
+
 				}
 			}
 		}()
@@ -145,9 +179,9 @@ func (d *Defender) Start(node *lightnode.Node, broadcastClients []*broadcaster.E
 								//fmt.Println("got tx", tx.TxHash().String())
 								for _, in := range tx.TxIn {
 									d.mu.RLock()
-									knownHash, found := d.inputsToMonitor[in.PreviousOutPoint]
+									knownHash := d.inputsToMonitor.Hash(in.PreviousOutPoint)
 									d.mu.RUnlock()
-									if !found {
+									if knownHash == nil {
 										continue
 									}
 									fmt.Println("known input seen!", in.PreviousOutPoint.String())
@@ -190,6 +224,7 @@ func (d *Defender) Start(node *lightnode.Node, broadcastClients []*broadcaster.E
 						fmt.Println("peer disconnected early", peer)
 						return
 					case msg := <-data.OnInvoice:
+						fmt.Println("received invoice from", peer)
 						retrieve := wire.NewMsgGetData()
 						for _, inv := range msg.InvList {
 							if !(inv.Type == wire.InvTypeWitnessTx || inv.Type == wire.InvTypeTx) {

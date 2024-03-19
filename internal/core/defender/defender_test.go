@@ -1,12 +1,18 @@
 package defender
 
 import (
+	"bytes"
 	"encoding/hex"
 	"fmt"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/darwayne/chain-grabber/internal/core/blockchain/lightnode"
 	"github.com/darwayne/chain-grabber/pkg/broadcaster"
+	"github.com/darwayne/chain-grabber/pkg/sigutil"
 	"github.com/stretchr/testify/require"
+	"log"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -31,6 +37,59 @@ func TestTransactionInfo_Tx(t *testing.T) {
 	t.Log(tx2.TxHash())
 }
 
+func TestMemoryConsumption(t *testing.T) {
+	//debug.SetMemoryLimit(83886080)
+	data := make(map[chainhash.Hash]map[uint32]*chainhash.Hash)
+	for i := 0; i < 260_000; i++ {
+
+		yo, err := chainhash.NewHashFromStr(strconv.Itoa(i))
+		require.NoError(t, err)
+		data[*yo] = map[uint32]*chainhash.Hash{1: yo, 2: yo}
+	}
+	fmt.Println("data set")
+	clear(data)
+
+	_ = data
+	sigutil.Wait()
+}
+
+func TestMonitorOutpoints(t *testing.T) {
+	txToDefend := "020000000001080e8ee61ccaaaf3a2902bc63a931cb704737ddd2ecb025ae8a0b6c83cc85c72760000000000fdffffff0e8ee61ccaaaf3a2902bc63a931cb704737ddd2ecb025ae8a0b6c83cc85c72760100000000fdffffff1cd07c2685562a18e18cf2bc11bd1d953f29bceb59542959c288092f3b04ac990000000000fdffffff1cd07c2685562a18e18cf2bc11bd1d953f29bceb59542959c288092f3b04ac990100000000fdffffffd57aa2c8e8132ae56efd7779614e2e81330a3569f23d83f063d1d88d2e6573a70000000000fdffffffd57aa2c8e8132ae56efd7779614e2e81330a3569f23d83f063d1d88d2e6573a70100000000fdffffff3e5229aee8269948e4f6c2113a6eb3cb086a2863da0656367caa4b4d80c18ef10000000000fdffffff3e5229aee8269948e4f6c2113a6eb3cb086a2863da0656367caa4b4d80c18ef10100000000fdffffff012d7d0909000000001600146a4738bb27b5d8dc02b8cf207648f025a5217105024730440220678267ccd215617433f54e7eb6d37045c6a2be78925cf07b64e79264ff7a187702206a3809bf7e096d596894dc8c2749a132eb073507d140f9e26c36e22d1c6d06d40121036b7bbdb7064b1dcb1483b2634e5072f7fcf88448702aa4f421486f62ff953d780247304402200bda2874de7fd621652c70924e5b0369ae1881cf913ee020f517fd8f0119ae6c0220116df45bad3052174e93cc7906c727d9a4e9ce67dc08f12be46cea19dd5c5755012103e91e9dcb7949f1d81f960cbaa03084fd4dcb06c6e5df2d06967c6ad3473b67350247304402203880a7e2f07d08387fa150516db6580c83750aca1aa60ae3858d4c0bbe0c79da0220100ce0c6fe0f00c26c5fbbc8fd0b3dde33d5b63c8e9c1cd9364de63ccf9de7ef012102af3c60a952aea304e0e3c860bf4500deda6a386e0aaa1d8b1a17f8ecc0933860024730440220232981875612127fdf2932a81a1a9d6cc3062e78906b328619768c50a1e8b70d02203b7e639fd16e5b5250d5429a607bf7246e5811ad76315db0edf601431f0dda6e0121039fcf18cd610a8a4c0d4f4ebb5c2a707bb5ecf681febcdfed3b8babb6aa1cce0b0247304402202c4ea479f476dd09515f7275e68055349bf63d36ba58e8bf14a61ec3e7fffdff0220602206ccdb7c0da53b8252cf10688e70872a01c7607b5b076925fceabc1837d1012102a0612113e548097982c3c63bbb2b099f9a8b082e97182b74c73edb83a3f121b00247304402207f56b67be92155f72e851987ce05d2777b9cab514c676ff4b8d968fb3eb5b4fa02207fd1fa6dfc0b4757c8c17161429b6d10ecc510afdb2260102a39350345003f6501210277bbd748ba49e1d25ba927779671dc7196ee9b4f0bbc1bbb466dfb9997e6fca102473044022001f124e38109777f5701e9a14232c37d50fe67ef6b51c10dd9e13b02de56916f02202aa015e873d5362e927b253d658f47cb9436322e0c036ae62c29d0aa92faacc3012102a0612113e548097982c3c63bbb2b099f9a8b082e97182b74c73edb83a3f121b00247304402204b3d891d93a3ece7ac4733e5fec6b622586a78badc88228988d99664e15a386f02203b12fe304c33d0f2d7939296ccde3b2de114534c31d9ca5d6e315e16278ccd57012102a939313ba38614081aee2d413be801880a27d1b9d5083ef022b7a6ca932c68f575502700"
+	_ = txToDefend
+
+	var tx wire.MsgTx
+	err := tx.Deserialize(hex.NewDecoder(strings.NewReader(txToDefend)))
+	require.NoError(t, err)
+
+	monitor := make(MonitoredOutPoint)
+	hash := tx.TxHash()
+	for _, in := range tx.TxIn {
+		monitor.Add(in.PreviousOutPoint, &hash)
+	}
+
+	require.Len(t, monitor, 4)
+	require.Equal(t, &hash, monitor.Hash(tx.TxIn[0].PreviousOutPoint))
+}
+
+func TestValidateSignature(t *testing.T) {
+	// initialTX
+	txToDefend := "020000000001080e8ee61ccaaaf3a2902bc63a931cb704737ddd2ecb025ae8a0b6c83cc85c72760000000000fdffffff0e8ee61ccaaaf3a2902bc63a931cb704737ddd2ecb025ae8a0b6c83cc85c72760100000000fdffffff1cd07c2685562a18e18cf2bc11bd1d953f29bceb59542959c288092f3b04ac990000000000fdffffff1cd07c2685562a18e18cf2bc11bd1d953f29bceb59542959c288092f3b04ac990100000000fdffffffd57aa2c8e8132ae56efd7779614e2e81330a3569f23d83f063d1d88d2e6573a70000000000fdffffffd57aa2c8e8132ae56efd7779614e2e81330a3569f23d83f063d1d88d2e6573a70100000000fdffffff3e5229aee8269948e4f6c2113a6eb3cb086a2863da0656367caa4b4d80c18ef10000000000fdffffff3e5229aee8269948e4f6c2113a6eb3cb086a2863da0656367caa4b4d80c18ef10100000000fdffffff012d7d0909000000001600146a4738bb27b5d8dc02b8cf207648f025a5217105024730440220678267ccd215617433f54e7eb6d37045c6a2be78925cf07b64e79264ff7a187702206a3809bf7e096d596894dc8c2749a132eb073507d140f9e26c36e22d1c6d06d40121036b7bbdb7064b1dcb1483b2634e5072f7fcf88448702aa4f421486f62ff953d780247304402200bda2874de7fd621652c70924e5b0369ae1881cf913ee020f517fd8f0119ae6c0220116df45bad3052174e93cc7906c727d9a4e9ce67dc08f12be46cea19dd5c5755012103e91e9dcb7949f1d81f960cbaa03084fd4dcb06c6e5df2d06967c6ad3473b67350247304402203880a7e2f07d08387fa150516db6580c83750aca1aa60ae3858d4c0bbe0c79da0220100ce0c6fe0f00c26c5fbbc8fd0b3dde33d5b63c8e9c1cd9364de63ccf9de7ef012102af3c60a952aea304e0e3c860bf4500deda6a386e0aaa1d8b1a17f8ecc0933860024730440220232981875612127fdf2932a81a1a9d6cc3062e78906b328619768c50a1e8b70d02203b7e639fd16e5b5250d5429a607bf7246e5811ad76315db0edf601431f0dda6e0121039fcf18cd610a8a4c0d4f4ebb5c2a707bb5ecf681febcdfed3b8babb6aa1cce0b0247304402202c4ea479f476dd09515f7275e68055349bf63d36ba58e8bf14a61ec3e7fffdff0220602206ccdb7c0da53b8252cf10688e70872a01c7607b5b076925fceabc1837d1012102a0612113e548097982c3c63bbb2b099f9a8b082e97182b74c73edb83a3f121b00247304402207f56b67be92155f72e851987ce05d2777b9cab514c676ff4b8d968fb3eb5b4fa02207fd1fa6dfc0b4757c8c17161429b6d10ecc510afdb2260102a39350345003f6501210277bbd748ba49e1d25ba927779671dc7196ee9b4f0bbc1bbb466dfb9997e6fca102473044022001f124e38109777f5701e9a14232c37d50fe67ef6b51c10dd9e13b02de56916f02202aa015e873d5362e927b253d658f47cb9436322e0c036ae62c29d0aa92faacc3012102a0612113e548097982c3c63bbb2b099f9a8b082e97182b74c73edb83a3f121b00247304402204b3d891d93a3ece7ac4733e5fec6b622586a78badc88228988d99664e15a386f02203b12fe304c33d0f2d7939296ccde3b2de114534c31d9ca5d6e315e16278ccd57012102a939313ba38614081aee2d413be801880a27d1b9d5083ef022b7a6ca932c68f575502700"
+	_ = txToDefend
+
+	var tx wire.MsgTx
+	err := tx.Deserialize(hex.NewDecoder(strings.NewReader(txToDefend)))
+	require.NoError(t, err)
+
+	flags := txscript.StandardVerifyFlags
+	vm, err := txscript.NewEngine(tx.TxIn[0].SignatureScript, &tx, 0, flags, nil, nil, -1, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	t.Log(vm.Execute())
+
+}
+
 func TestDefender(t *testing.T) {
 	node, err := lightnode.NewTestNet()
 	require.NoError(t, err)
@@ -42,6 +101,22 @@ func TestDefender(t *testing.T) {
 	var tx wire.MsgTx
 	err = tx.Deserialize(hex.NewDecoder(strings.NewReader(txToDefend)))
 	require.NoError(t, err)
+
+	if 1 == 1 {
+		h := tx.TxHash()
+		size := len(h.CloneBytes())
+		var msg wire.MsgGetData
+		msg.AddInvVect(wire.NewInvVect(wire.InvTypeTx, &h))
+
+		const maxProtocolVersion = 70002
+		var buf bytes.Buffer
+		msg.BtcEncode(&buf, maxProtocolVersion, wire.WitnessEncoding)
+		size += buf.Len()
+
+		fmt.Println("total bytes", size)
+		return
+
+	}
 
 	def := New()
 	err = def.Defend(&tx)

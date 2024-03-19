@@ -3,20 +3,19 @@ package lightnode
 import (
 	"context"
 	"fmt"
-	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/connmgr"
 	"github.com/btcsuite/btcd/peer"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/darwayne/chain-grabber/pkg/sigutil"
 	"github.com/darwayne/errutil"
 	_ "github.com/mattn/go-sqlite3"
+	"go.uber.org/zap"
 	"golang.org/x/net/proxy"
-	"log"
 	"maps"
 	"net"
 	"os"
-	"os/signal"
 	"sort"
 	"strings"
 	"sync"
@@ -25,6 +24,7 @@ import (
 )
 
 type Node struct {
+	cancel             context.CancelFunc
 	ctx                context.Context
 	dialer             proxy.Dialer
 	chain              *chaincfg.Params
@@ -43,6 +43,7 @@ type Node struct {
 	headerMu           sync.RWMutex
 	Headers            []wire.BlockHeader
 	MaxHeaders         int
+	logger             *zap.Logger
 }
 
 type PeerData struct {
@@ -60,44 +61,55 @@ type PeerData struct {
 	manuallySent     int64
 }
 
-func NewTestNet() (*Node, error) {
-	d, err := proxy.SOCKS5("tcp", "atl.socks.ipvanish.com:1080", &proxy.Auth{
-		User:     os.Getenv("PROXY_USER"),
-		Password: os.Getenv("PROXY_PASS"),
-	}, &net.Dialer{})
-	if err != nil {
-		return nil, err
-	}
-
-	return NewNode(d, &chaincfg.TestNet3Params), nil
-}
-
-func NewMainNet() (*Node, error) {
-	d, err := proxy.SOCKS5("tcp",
-		//"atl.socks.ipvanish.com:1080",
-		"mia.socks.ipvanish.com:1080",
-		&proxy.Auth{
+func NewTestNet(logger *zap.Logger) (*Node, error) {
+	var err error
+	var d proxy.Dialer
+	if os.Getenv("PROXY_USER") != "" {
+		d, err = proxy.SOCKS5("tcp", "atl.socks.ipvanish.com:1080", &proxy.Auth{
 			User:     os.Getenv("PROXY_USER"),
 			Password: os.Getenv("PROXY_PASS"),
 		}, &net.Dialer{})
+	} else {
+		d = &net.Dialer{}
+	}
 	if err != nil {
 		return nil, err
 	}
 
-	return NewNode(d, &chaincfg.MainNetParams), nil
+	return NewNode(logger, d, &chaincfg.TestNet3Params), nil
 }
 
-func NewNode(dialer proxy.Dialer, chain *chaincfg.Params) *Node {
+func NewMainNet(logger *zap.Logger) (*Node, error) {
+	var err error
+	var d proxy.Dialer
+	if os.Getenv("PROXY_USER") != "" {
+		d, err = proxy.SOCKS5("tcp",
+			//"atl.socks.ipvanish.com:1080",
+			"mia.socks.ipvanish.com:1080",
+			&proxy.Auth{
+				User:     os.Getenv("PROXY_USER"),
+				Password: os.Getenv("PROXY_PASS"),
+			}, &net.Dialer{})
+	} else {
+		d = &net.Dialer{}
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	return NewNode(logger, d, &chaincfg.MainNetParams), nil
+}
+
+func NewNode(logger *zap.Logger, dialer proxy.Dialer, chain *chaincfg.Params) *Node {
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		c := make(chan os.Signal, 1)
-		signal.Notify(c, os.Interrupt)
-		select {
-		case <-c:
-		}
+		sigutil.Wait()
 		cancel()
 	}()
 	return &Node{
+		logger:             logger,
+		cancel:             cancel,
 		ctx:                ctx,
 		dialer:             dialer,
 		chain:              chain,
@@ -114,7 +126,7 @@ func NewNode(dialer proxy.Dialer, chain *chaincfg.Params) *Node {
 func (n *Node) ConnectV2() {
 	connmgr.SeedFromDNS(n.chain,
 		wire.SFNodeNetwork, net.LookupIP, func(addrs []*wire.NetAddressV2) {
-			log.Println("got", len(addrs), "from dns")
+			//log.Println("got", len(addrs), "from dns")
 			for _, addr := range addrs {
 				if strings.Contains(addr.Addr.String(), ":") {
 					//log.Println("skipping address", addr)
@@ -128,43 +140,6 @@ func (n *Node) ConnectV2() {
 			}
 			//n.ConnectV2()
 		})
-}
-
-func (n *Node) Connect() {
-	//n.mu.Lock()
-	//if n.Connected {
-	//	n.mu.Unlock()
-	//	return
-	//}
-	//
-	//n.Connected = true
-	//n.mu.Unlock()
-	wait := make(chan struct{}, 1)
-	connmgr.SeedFromDNS(n.chain,
-		wire.SFNodeNetwork, net.LookupIP, func(addrs []*wire.NetAddressV2) {
-			for _, addr := range addrs {
-				if strings.Contains(addr.Addr.String(), ":") {
-					log.Println("skipping address", addr)
-					continue
-				}
-
-				log.Println("adding", addr.Addr, "to list")
-
-				n.mu.Lock()
-				n.initialPeers[fmt.Sprintf("%s:%d", addr.Addr.String(), addr.Port)] = struct{}{}
-				n.mu.Unlock()
-			}
-			select {
-			case wait <- struct{}{}:
-			default:
-			}
-		})
-
-	select {
-	case <-wait:
-		n.connectToInitialPeers()
-	case <-n.ctx.Done():
-	}
 }
 
 func (n *Node) connectToInitialPeers() {
@@ -219,7 +194,7 @@ func (n *Node) SendTransactionToPeer(ctx context.Context, peer *peer.Peer, tx *w
 			return ctx.Err()
 		case req := <-info.OnGetData:
 			for _, inv := range req.InvList {
-				log.Println(inv.Type, inv.Hash, "inv requested from", peer)
+				//log.Println(inv.Type, inv.Hash, "inv requested from", peer)
 				if !((inv.Type == wire.InvTypeTx || inv.Type == wire.InvTypeWitnessTx) && inv.Hash == hash) {
 					continue
 				}
@@ -234,119 +209,8 @@ func (n *Node) TotalPeers() int64 {
 	return atomic.LoadInt64(&n.connectedPeers)
 }
 
-func (n *Node) handeHeaders(p *peer.Peer) {
-	data := n.GetPeerData(p)
-	if data == nil {
-		log.Println("no data detected")
-		return
-	}
-	maxHeaders := n.MaxHeaders
-	if maxHeaders == 0 {
-		maxHeaders = 100
-	}
-
-	n.headerMu.RLock()
-	headerSize := len(n.Headers)
-	n.headerMu.RUnlock()
-	if headerSize == 0 {
-		var hash *chainhash.Hash
-		if n.chain == &chaincfg.MainNetParams {
-			hash, _ = chainhash.NewHashFromStr("0000000000000000000393398b854ef335316e882ba041cf5a10013ec7b7de22")
-		} else {
-			hash, _ = chainhash.NewHashFromStr("0000000000000014e2245b613b729216524228d84f01e62ee17f602ea2654c2c")
-		}
-		p.PushGetHeadersMsg(blockchain.BlockLocator{hash}, &chainhash.Hash{})
-	}
-
-	for {
-		select {
-		case <-n.Done():
-			return
-		case <-data.Disconnected:
-			return
-		case req := <-data.OnBlock:
-			fmt.Println("got block", req.BlockHash())
-			n.headerMu.Lock()
-			if len(n.Headers) == 0 {
-				n.headerMu.Unlock()
-				continue
-			}
-
-			lastHeader := n.Headers[len(n.Headers)-1]
-			if req.Header.PrevBlock == lastHeader.BlockHash() {
-				n.Headers = append(n.Headers, req.Header)
-			}
-			if len(n.Headers) > maxHeaders {
-				fmt.Println("adding block to headers")
-				n.Headers = n.Headers[len(n.Headers)-maxHeaders:]
-			}
-			n.headerMu.Unlock()
-		case req := <-data.OnGetHeaders:
-			n.headerMu.RLock()
-			copied := make([]*wire.BlockHeader, 0, len(n.Headers))
-			for _, header := range n.Headers {
-				header := header
-				copied = append(copied, &header)
-			}
-			n.headerMu.RUnlock()
-
-			msg := wire.NewMsgHeaders()
-			startFrom := 0
-			stopAt := len(copied)
-			for idx, c := range copied {
-				if len(req.BlockLocatorHashes) == 0 {
-					break
-				}
-				hash := req.BlockLocatorHashes[0]
-				if *hash == c.PrevBlock {
-					startFrom = idx
-				}
-				if req.HashStop == c.BlockHash() {
-					stopAt = idx
-					break
-				}
-			}
-
-			for _, c := range copied[startFrom:stopAt] {
-				msg.AddBlockHeader(c)
-			}
-
-			p.QueueMessage(msg, nil)
-
-		case req := <-data.OnHeaders:
-			if len(req.Headers) == 0 {
-				continue
-			}
-			n.headerMu.Lock()
-			var updated bool
-			if len(n.Headers) == 0 {
-				n.Headers = append(n.Headers, *req.Headers[0])
-				updated = true
-			}
-
-			lastHeader := n.Headers[len(n.Headers)-1]
-			for _, header := range req.Headers {
-				if header.PrevBlock != lastHeader.BlockHash() {
-					continue
-				}
-
-				n.Headers = append(n.Headers, *header)
-				updated = true
-				lastHeader = n.Headers[len(n.Headers)-1]
-			}
-			if len(n.Headers) > maxHeaders {
-				n.Headers = n.Headers[len(n.Headers)-maxHeaders:]
-			}
-			total := len(n.Headers)
-			n.headerMu.Unlock()
-			if updated {
-				fmt.Println("headers updated", total)
-				hash := lastHeader.BlockHash()
-				p.PushGetHeadersMsg(blockchain.BlockLocator{&hash}, &chainhash.Hash{})
-			}
-
-		}
-	}
+func (n *Node) Shutdown() {
+	n.cancel()
 }
 
 func (n *Node) connectPeer(addr string) (e error) {
@@ -355,13 +219,7 @@ func (n *Node) connectPeer(addr string) (e error) {
 		atomic.AddInt64(&n.connectedPeers, -1)
 		return
 	}
-	//defer func() {
-	//	if e != nil {
-	//		n.mu.Lock()
-	//		delete(n.initialPeers, addr)
-	//		n.mu.Unlock()
-	//	}
-	//}()
+
 	n.mu.Lock()
 	if _, found := n.initialPeers[addr]; found {
 		n.mu.Unlock()
@@ -383,8 +241,7 @@ func (n *Node) connectPeer(addr string) (e error) {
 	p, err := peer.NewOutboundPeer(&peer.Config{
 		ChainParams:     n.chain,
 		TrickleInterval: 500 * time.Millisecond,
-		//NewestBlock: n.newestBlock,
-		Services: wire.SFNodeNetwork,
+		Services:        wire.SFNodeNetwork,
 		Listeners: peer.MessageListeners{
 			OnAddr: func(p *peer.Peer, msg *wire.MsgAddr) {
 				//log.Println("got v1 addresses", len(msg.AddrList))
@@ -447,7 +304,7 @@ func (n *Node) connectPeer(addr string) (e error) {
 				select {
 				case data.OnTX <- msg:
 				default:
-
+					n.logger.Warn("tx message dropped")
 				}
 				//log.Println("got transaction", msg.TxHash())
 			},
@@ -461,8 +318,6 @@ func (n *Node) connectPeer(addr string) (e error) {
 
 				}
 
-				go n.handeHeaders(p)
-
 				p.QueueMessage(&wire.MsgGetAddr{}, nil)
 			},
 			OnHeaders: func(p *peer.Peer, msg *wire.MsgHeaders) {
@@ -475,7 +330,7 @@ func (n *Node) connectPeer(addr string) (e error) {
 				case data.OnHeaders <- msg:
 				case <-n.ctx.Done():
 				default:
-					log.Println("skipped local headers message", p)
+					n.logger.Warn("skipped local headers message", zap.String("peer", p.String()))
 				}
 			},
 			OnInv: func(p *peer.Peer, msg *wire.MsgInv) {
@@ -494,6 +349,7 @@ func (n *Node) connectPeer(addr string) (e error) {
 				case data.OnInvoice <- msg:
 				case <-n.ctx.Done():
 				default:
+					n.logger.Warn("warning invoice dropped")
 				}
 			},
 			OnGetHeaders: func(p *peer.Peer, msg *wire.MsgGetHeaders) {
@@ -521,7 +377,7 @@ func (n *Node) connectPeer(addr string) (e error) {
 					//log.Println("sent block to local channel", p, "hash:", msg.BlockHash())
 				case <-n.ctx.Done():
 				default:
-					log.Println("block skipped local channel", p, "hash:", msg.BlockHash())
+					//log.Println("block skipped local channel", p, "hash:", msg.BlockHash())
 				}
 			},
 			OnMerkleBlock: func(p *peer.Peer, msg *wire.MsgMerkleBlock) {

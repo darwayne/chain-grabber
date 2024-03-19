@@ -85,6 +85,10 @@ func NewElectrumClient() *ElectrumClient {
 	}
 }
 
+func (c *ElectrumClient) Reconnect() error {
+	return c.Connect(c.Server)
+}
+
 // Connect establishes a TLS connection to an Electrum server.
 func (c *ElectrumClient) Connect(server string) error {
 	c.Disconnect()

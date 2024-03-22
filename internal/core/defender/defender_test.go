@@ -11,6 +11,7 @@ import (
 	"github.com/darwayne/chain-grabber/pkg/broadcaster"
 	"github.com/darwayne/chain-grabber/pkg/sigutil"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 	"log"
 	"strconv"
 	"strings"
@@ -91,7 +92,9 @@ func TestValidateSignature(t *testing.T) {
 }
 
 func TestDefender(t *testing.T) {
-	node, err := lightnode.NewTestNet()
+	l, err := zap.NewDevelopment()
+	require.NoError(t, err)
+	node, err := lightnode.NewTestNet(l)
 	require.NoError(t, err)
 
 	// initialTX

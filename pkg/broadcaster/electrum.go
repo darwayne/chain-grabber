@@ -2,14 +2,17 @@ package broadcaster
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"github.com/muun/recovery/utils"
+	"github.com/pkg/errors"
+	"golang.org/x/net/proxy"
 	"net"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -355,6 +358,30 @@ func (c *ElectrumClient) establishConnection() error {
 
 	dialer := &net.Dialer{
 		Timeout: connectionTimeout,
+	}
+	if os.Getenv("PROXY_USER") != "" {
+		d, err := proxy.SOCKS5("tcp", "atl.socks.ipvanish.com:1080", &proxy.Auth{
+			User:     os.Getenv("PROXY_USER"),
+			Password: os.Getenv("PROXY_PASS"),
+		}, dialer)
+		if err != nil {
+			return err
+		}
+
+		rawConn, err := d.Dial("tcp", c.Server)
+		if err != nil {
+			return errors.Wrapf(err, "error connecting to: %s", c.Server)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), connectionTimeout)
+		defer cancel()
+		cli := tls.Client(rawConn, config)
+		if err := cli.HandshakeContext(ctx); err != nil {
+			rawConn.Close()
+			return errors.Wrapf(err, "error creating handshake to: %s", c.Server)
+		}
+
+		c.conn = cli
+		return nil
 	}
 
 	conn, err := tls.DialWithDialer(dialer, "tcp", c.Server, config)

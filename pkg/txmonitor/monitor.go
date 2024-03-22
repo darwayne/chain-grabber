@@ -9,10 +9,12 @@ import (
 	"github.com/darwayne/chain-grabber/pkg/broadcaster"
 	"github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/hashicorp/golang-lru/v2/simplelru"
+	"sync"
 	"time"
 )
 
 type Monitor struct {
+	mu     sync.Mutex
 	cache  simplelru.LRUCache[chainhash.Hash, struct{}]
 	broker *broadcaster.Broker[*wire.MsgTx]
 }
@@ -65,6 +67,11 @@ func (m *Monitor) onPeerConnected(ctx context.Context, node *lightnode.Node, pee
 			return
 		case tx := <-data.OnTX:
 			go func() {
+				m.mu.Lock()
+				defer m.mu.Unlock()
+				if m.cache.Contains(tx.TxHash()) {
+					return
+				}
 				m.cache.Add(tx.TxHash(), struct{}{})
 				m.broker.Publish(tx)
 			}()
@@ -76,6 +83,7 @@ func (m *Monitor) onPeerConnected(ctx context.Context, node *lightnode.Node, pee
 					if !(inv.Type == wire.InvTypeWitnessTx || inv.Type == wire.InvTypeTx) {
 						continue
 					}
+					inv.Type = wire.InvTypeWitnessTx
 					if m.cache.Contains(inv.Hash) {
 						continue
 					}

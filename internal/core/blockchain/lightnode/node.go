@@ -235,13 +235,14 @@ func (n *Node) connectPeer(addr string) (e error) {
 		OnBlock:      make(chan *wire.MsgBlock, 1),
 		OnGetData:    make(chan *wire.MsgGetData, 1),
 		OnGetHeaders: make(chan *wire.MsgGetHeaders, 1),
-		OnTX:         make(chan *wire.MsgTx, 1),
+		OnTX:         make(chan *wire.MsgTx, 100),
 	}
 	var versionTime time.Time
 	p, err := peer.NewOutboundPeer(&peer.Config{
 		ChainParams:     n.chain,
 		TrickleInterval: 500 * time.Millisecond,
-		Services:        wire.SFNodeNetwork,
+		Services:        wire.SFNodeNetwork | wire.SFNodeWitness | wire.SFNode2X,
+		ProtocolVersion: peer.MaxProtocolVersion,
 		Listeners: peer.MessageListeners{
 			OnAddr: func(p *peer.Peer, msg *wire.MsgAddr) {
 				//log.Println("got v1 addresses", len(msg.AddrList))

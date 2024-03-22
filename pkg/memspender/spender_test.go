@@ -149,7 +149,7 @@ func TestSatsPerVByte(t *testing.T) {
 func TestSpendScript(t *testing.T) {
 	cli := mempoolspace.NewRest(mempoolspace.WithNetwork(&chaincfg.TestNet3Params))
 	tx := wire.NewMsgTx(wire.TxVersion)
-	outPoint, err := wire.NewOutPointFromString("026ea8e74ed88459b0e41ad446fbb9fae3d120640a60b52e5891d977702db317:1")
+	outPoint, err := wire.NewOutPointFromString("8d0cb50eec9ae9310da38f5139668353f3563f233fd62f6e34e7ab43fdad253d:1")
 	require.NoError(t, err)
 
 	scriptSig, err := txscript.NewScriptBuilder().AddOp(txscript.OP_TRUE).Script()
@@ -253,8 +253,12 @@ func testNetwork(t *testing.T, isMainNet bool) {
 
 	require.NoError(t, err)
 
-	spender, err := memspender.New(m.Subscribe(), !isMainNet, getPublisher(t, !isMainNet, l), addressToUse, l)
+	publisher := broadcaster.New(!isMainNet, l)
+
+	spender, err := memspender.New(m.Subscribe(), !isMainNet, publisher.Broker, addressToUse, l)
 	require.NoError(t, err)
+
+	go publisher.Connect(ctx)
 	go func() {
 		l.Info("generating keys")
 		err := spender.GenerateKeys([2]int{0, 20})

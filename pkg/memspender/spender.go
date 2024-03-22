@@ -49,6 +49,7 @@ type TxInfo struct {
 	*wire.MsgTx
 	IsWeak  bool
 	IsEnemy bool
+	IsBad   bool
 }
 
 func New(channel chan *wire.MsgTx, isTestNet bool, publisher *broadcaster.Broker[*string], address string, logger *zap.Logger) (*Spender, error) {
@@ -529,6 +530,7 @@ func (s *Spender) classifyTx(tx *wire.MsgTx) TxClassification {
 			}
 
 			if len(orig.TxOut) <= int(outpoint.Index) {
+				s.txCache.Add(outpoint.Hash, TxInfo{MsgTx: orig, IsBad: true})
 				s.logger.Warn("got bad outpoint .. skipping")
 				return UnSpendable
 			}
@@ -536,6 +538,7 @@ func (s *Spender) classifyTx(tx *wire.MsgTx) TxClassification {
 			scriptClass, _, _, err := txscript.ExtractPkScriptAddrs(orig.TxOut[int(outpoint.Index)].PkScript, s.cfg)
 			if err != nil || !(scriptClass == txscript.WitnessV0ScriptHashTy || scriptClass == txscript.ScriptHashTy) {
 				s.logger.Debug("skipping bad tx output", zap.String("txid", tx.TxHash().String()))
+				s.txCache.Add(outpoint.Hash, TxInfo{MsgTx: orig, IsBad: true})
 				valid = false
 			}
 
@@ -551,7 +554,8 @@ func (s *Spender) classifyTx(tx *wire.MsgTx) TxClassification {
 	}
 
 	for _, in := range tx.TxIn {
-		if s.txCache.Contains(in.PreviousOutPoint.Hash) {
+		info, found := s.txCache.Get(in.PreviousOutPoint.Hash)
+		if found && !info.IsBad {
 			return EnemyWeakKey
 		}
 	}

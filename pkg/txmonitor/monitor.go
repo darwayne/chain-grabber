@@ -17,6 +17,9 @@ type Monitor struct {
 	mu     sync.Mutex
 	cache  simplelru.LRUCache[chainhash.Hash, struct{}]
 	broker *broadcaster.Broker[*wire.MsgTx]
+
+	queueMu sync.RWMutex
+	queue   []*wire.MsgTx
 }
 
 func New() *Monitor {
@@ -41,6 +44,40 @@ func (m *Monitor) Stop() {
 }
 
 func (m *Monitor) Start(ctx context.Context, node *lightnode.Node) {
+	go func() {
+		ticker := time.NewTicker(time.Millisecond)
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+
+			m.queueMu.RLock()
+			size := len(m.queue)
+			txs := make([]*wire.MsgTx, 0)
+			txs = append(txs, m.queue...)
+			m.queueMu.RUnlock()
+			if size == 0 {
+				continue
+			}
+
+			for _, tx := range txs {
+				hash := tx.TxHash()
+				if m.cache.Contains(hash) {
+					continue
+				}
+
+				m.cache.Add(hash, struct{}{})
+				m.broker.Publish(tx)
+			}
+
+			m.queueMu.Lock()
+			m.queue = m.queue[size:]
+			m.queueMu.Unlock()
+		}
+	}()
 	for {
 		select {
 		case <-ctx.Done():
@@ -66,15 +103,9 @@ func (m *Monitor) onPeerConnected(ctx context.Context, node *lightnode.Node, pee
 		case <-data.Disconnected:
 			return
 		case tx := <-data.OnTX:
-			go func() {
-				m.mu.Lock()
-				defer m.mu.Unlock()
-				if m.cache.Contains(tx.TxHash()) {
-					return
-				}
-				m.cache.Add(tx.TxHash(), struct{}{})
-				m.broker.Publish(tx)
-			}()
+			m.queueMu.Lock()
+			m.queue = append(m.queue, tx)
+			m.queueMu.Unlock()
 
 		case msg := <-data.OnInvoice:
 			go func() {

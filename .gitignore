@@ -2,3 +2,5 @@ poc_test.go
 *.gz
 *.sqlite
 storedblocks
+passwords.go
+build/

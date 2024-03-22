@@ -1,7 +1,5 @@
 package broadcaster
 
-import "fmt"
-
 type Broker[T any] struct {
 	doneChan chan struct{}
 	publish  chan T
@@ -33,7 +31,12 @@ func (b *Broker[T]) Start() {
 				select {
 				case ch <- msg:
 				default:
-					fmt.Println("dropped message")
+					go func() {
+						select {
+						case <-b.Done():
+						case ch <- msg:
+						}
+					}()
 				}
 			}
 		}

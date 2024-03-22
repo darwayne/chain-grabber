@@ -37,6 +37,7 @@ func TestSpenderOnTestNet(t *testing.T) {
 }
 
 func TestSpenderOnMainNet(t *testing.T) {
+	t.Setenv("PROXY_USER", "")
 	testNetwork(t, true)
 }
 
@@ -146,16 +147,16 @@ func TestSatsPerVByte(t *testing.T) {
 }
 
 func TestSpendScript(t *testing.T) {
-
+	cli := mempoolspace.NewRest(mempoolspace.WithNetwork(&chaincfg.TestNet3Params))
 	tx := wire.NewMsgTx(wire.TxVersion)
-	outPoint, err := wire.NewOutPointFromString("558c230fbb8a352bf77c1aa4e47d27f6ac491208d827b8ad7b4cb7338bcfccab:1")
+	outPoint, err := wire.NewOutPointFromString("026ea8e74ed88459b0e41ad446fbb9fae3d120640a60b52e5891d977702db317:1")
 	require.NoError(t, err)
 
 	scriptSig, err := txscript.NewScriptBuilder().AddOp(txscript.OP_TRUE).Script()
 	require.NoError(t, err)
 	_ = scriptSig
 
-	isWitness := true
+	isWitness := false
 
 	in := wire.NewTxIn(outPoint, []byte{
 		txscript.OP_DATA_1, txscript.OP_TRUE,
@@ -171,7 +172,10 @@ func TestSpendScript(t *testing.T) {
 	require.NoError(t, err)
 	receiverScript, err := txscript.PayToAddrScript(addr)
 	require.NoError(t, err)
-	tx.AddTxOut(wire.NewTxOut(76590723-(int64(txhelper.VBytes(tx)*4)), receiverScript))
+	info, err := cli.GetTransaction(context.Background(), outPoint.Hash)
+	require.NoError(t, err)
+	val := info.TxOut[int(outPoint.Index)].Value
+	tx.AddTxOut(wire.NewTxOut(val-(int64(txhelper.VBytes(tx)*4)), receiverScript))
 
 	//logger, err := zap.NewDevelopment()
 	require.NoError(t, err)
@@ -199,7 +203,7 @@ func TestSpendScript(t *testing.T) {
 	//pub := getPublisher(t, true, logger)
 	//logger.Warn("woah there")
 	//pub.Publish(&str)
-	err = mempoolspace.NewRest(mempoolspace.WithNetwork(&chaincfg.TestNet3Params)).
+	err = cli.
 		BroadcastHex(context.Background(), str)
 
 	fmt.Println("sending:\n===", str, "\n====")
@@ -253,7 +257,7 @@ func testNetwork(t *testing.T, isMainNet bool) {
 	require.NoError(t, err)
 	go func() {
 		l.Info("generating keys")
-		err := spender.GenerateKeys([2]int{0, 90_000})
+		err := spender.GenerateKeys([2]int{0, 20})
 		if err != nil {
 			l.Warn("error generating keys", zap.String("err", err.Error()))
 			return

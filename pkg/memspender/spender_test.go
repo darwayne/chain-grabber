@@ -105,6 +105,127 @@ func calcHash(buf []byte, hasher hash.Hash) []byte {
 	return hasher.Sum(nil)
 }
 
+func TestBadScript(t *testing.T) {
+
+}
+
+func TestSimpleScript(t *testing.T) {
+	hexVal := fmt.Sprintf("%x", "hello world")
+	anyoneCanSpendScript, err := txscript.NewScriptBuilder().
+		AddData([]byte(hexVal)).
+		AddData([]byte(hexVal)).
+		//AddOp(txscript.OP_EQUAL).
+		AddOp(txscript.OP_EQUAL).
+		Script()
+	require.NoError(t, err)
+
+	// Hash the script to obtain the script hash
+	scriptHash := calcHash(anyoneCanSpendScript, sha256.New())
+
+	var addr btcutil.Address
+	addr, err = btcutil.NewAddressScriptHash(anyoneCanSpendScript, &chaincfg.TestNet3Params)
+	require.NoError(t, err)
+
+	t.Log("testnet script address", addr.String())
+
+	addr, err = btcutil.NewAddressWitnessScriptHash(scriptHash, &chaincfg.TestNet3Params)
+	require.NoError(t, err)
+
+	t.Log("testnet witness address", addr.String())
+
+	addr, err = btcutil.NewAddressScriptHash(anyoneCanSpendScript, &chaincfg.MainNetParams)
+	require.NoError(t, err)
+
+	t.Log("mainNet script address", addr.String())
+
+	addr, err = btcutil.NewAddressWitnessScriptHash(scriptHash, &chaincfg.MainNetParams)
+	require.NoError(t, err)
+
+	t.Log("mainNet taproot address", addr.String())
+}
+
+func TestSpendSimpleScript(t *testing.T) {
+	cli := mempoolspace.NewRest(mempoolspace.WithNetwork(&chaincfg.TestNet3Params))
+	tx := wire.NewMsgTx(wire.TxVersion)
+	outPoint, err := wire.NewOutPointFromString("3358506c52451e0deb5098c4797dadb1401f36e23001f5f7cfb76674baa0fffb:0")
+	require.NoError(t, err)
+
+	isWitness := false
+
+	hexVal := fmt.Sprintf("%x", "i wonder who satoshi is")
+	anyoneCanSpendScript, err := txscript.NewScriptBuilder().
+		AddData([]byte(hexVal)).
+		AddData([]byte(hexVal)).
+		//AddOp(txscript.OP_EQUAL).
+		AddOp(txscript.OP_EQUAL).
+		Script()
+	require.NoError(t, err)
+	_ = anyoneCanSpendScript
+
+	scriptToUse := anyoneCanSpendScript
+
+	if !isWitness {
+		scriptToUse, err = txscript.NewScriptBuilder().
+			AddData(anyoneCanSpendScript).Script()
+		require.NoError(t, err)
+	}
+
+	in := wire.NewTxIn(outPoint, scriptToUse, nil)
+	if isWitness {
+		in = wire.NewTxIn(outPoint, nil, [][]byte{scriptToUse})
+	}
+	in.Sequence = 0xffffffff - 2
+	tx.AddTxIn(in)
+	// use a different address to see if grabber will grab
+	const testAddress = "tb1qqcytw4yztrz0qrdxyefx82zg6tpr8nzqxncw5p"
+	addr, err := btcutil.DecodeAddress(testAddress, &chaincfg.TestNet3Params)
+	require.NoError(t, err)
+	receiverScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+	info, err := cli.GetTransaction(context.Background(), outPoint.Hash)
+	require.NoError(t, err)
+	val := info.TxOut[int(outPoint.Index)].Value
+	tx.AddTxOut(wire.NewTxOut(val-(int64(txhelper.VBytes(tx)*4)), receiverScript))
+
+	//logger, err := zap.NewDevelopment()
+	require.NoError(t, err)
+
+	weight := blockchain.GetTransactionWeight(btcutil.NewTx(tx))
+
+	// Convert weight to vbytes
+	vbytes := weight / blockchain.WitnessScaleFactor
+
+	// Print the total vbytes
+	fmt.Printf("Total vbytes: %d\n", vbytes)
+	fmt.Println("weight", weight)
+
+	fmt.Println()
+
+	//if 1 == 1 {
+	//	return
+	//}
+
+	var buff bytes.Buffer
+	writer := hex.NewEncoder(&buff)
+	err = tx.Serialize(writer)
+	require.NoError(t, err)
+	str := buff.String()
+	//pub := getPublisher(t, true, logger)
+	//logger.Warn("woah there")
+	//pub.Publish(&str)
+	err = cli.
+		BroadcastHex(context.Background(), str)
+
+	fmt.Println("sending:\n===", str, "\n====")
+	fmt.Println("err", err)
+
+	select {
+	case <-time.After(30 * time.Second):
+	case <-sigutil.Done():
+	}
+
+}
+
 func TestPayToAnyoneAddress(t *testing.T) {
 	//hexVal := fmt.Sprintf("%x", "hello")
 	anyoneCanSpendScript, err := txscript.NewScriptBuilder().
@@ -149,7 +270,7 @@ func TestSatsPerVByte(t *testing.T) {
 func TestSpendScript(t *testing.T) {
 	cli := mempoolspace.NewRest(mempoolspace.WithNetwork(&chaincfg.TestNet3Params))
 	tx := wire.NewMsgTx(wire.TxVersion)
-	outPoint, err := wire.NewOutPointFromString("8d0cb50eec9ae9310da38f5139668353f3563f233fd62f6e34e7ab43fdad253d:1")
+	outPoint, err := wire.NewOutPointFromString("9fc021f55392de91d4ca20ff709048b6638af9046cab2f1111f3b034264663a4:0")
 	require.NoError(t, err)
 
 	scriptSig, err := txscript.NewScriptBuilder().AddOp(txscript.OP_TRUE).Script()

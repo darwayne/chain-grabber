@@ -11,6 +11,7 @@ import (
 
 type GeneratedKey struct {
 	AddressKeyMap map[string]*btcutil.WIF
+	KnownKeys     map[[33]byte]*btcutil.WIF
 	AddressOrder  map[string]float64
 }
 
@@ -88,6 +89,7 @@ func GenerateKeys(start, end int, params *chaincfg.Params) (GeneratedKey, error)
 	result := GeneratedKey{
 		AddressKeyMap: make(map[string]*btcutil.WIF),
 		AddressOrder:  make(map[string]float64),
+		KnownKeys:     make(map[[33]byte]*btcutil.WIF),
 	}
 	for {
 		select {
@@ -97,6 +99,9 @@ func GenerateKeys(start, end int, params *chaincfg.Params) (GeneratedKey, error)
 			return result, nil
 		case work := <-completedWork:
 			for k, v := range work.AddressKeyMap {
+				if v.CompressPubKey {
+					result.KnownKeys[[33]byte(v.SerializePubKey())] = v
+				}
 				v := v
 				result.AddressKeyMap[k] = v
 			}

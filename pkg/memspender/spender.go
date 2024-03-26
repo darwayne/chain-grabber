@@ -36,6 +36,7 @@ type Spender struct {
 	addressMapMu sync.RWMutex
 	addressMap   map[string]*btcutil.WIF
 	addressOrder map[float64]string
+	knownKeys    map[[33]byte]*btcutil.WIF
 	secretStore  grabber.MemorySecretStore
 
 	transMu          sync.RWMutex
@@ -113,6 +114,10 @@ func (s *Spender) GenerateKeys(keyRange [2]int) error {
 			if err != nil {
 				return err
 			}
+			if compressed {
+				result := [33]byte(key.PubKey().SerializeCompressed())
+				gen.KnownKeys[result] = wif
+			}
 			addrStr := addr.EncodeAddress()
 			gen.AddressKeyMap[addrStr] = wif
 			gen.AddressOrder[addrStr] = num
@@ -130,6 +135,7 @@ func (s *Spender) GenerateKeys(keyRange [2]int) error {
 
 	s.addressMapMu.Lock()
 	defer s.addressMapMu.Unlock()
+	s.knownKeys = gen.KnownKeys
 	s.addressMap = gen.AddressKeyMap
 	s.secretStore = grabber.NewMemorySecretStore(gen.AddressKeyMap, s.cfg)
 	return nil
@@ -274,7 +280,11 @@ func (s *Spender) Start(ctx context.Context) {
 					s.fee = *fee
 					s.feeMu.Unlock()
 				}
-				s.logger.Debug("transactions seen", zap.Int64("total", atomic.LoadInt64(&s.skipped)))
+				seen := atomic.LoadInt64(&s.skipped)
+				if seen == 0 {
+					s.logger.Warn("transactions seen", zap.Int64("total", seen))
+				}
+
 				atomic.StoreInt64(&s.skipped, 0)
 			}()
 		}
@@ -303,6 +313,8 @@ func (s *Spender) onTx(ctx context.Context, tx *wire.MsgTx) {
 		s.txCache.Add(tx.TxHash(), TxInfo{MsgTx: tx, IsEnemy: true})
 		s.logger.Info("enemy detected!", zap.String("txid", tx.TxHash().String()))
 		s.spendWeakKey(ctx, tx, true)
+	case SpentKnownKey:
+		s.spendKnownKey(ctx, tx)
 	default:
 		//s.logger.Debug("skipping",
 		//	zap.String("txid", tx.TxHash().String()),
@@ -310,6 +322,37 @@ func (s *Spender) onTx(ctx context.Context, tx *wire.MsgTx) {
 		//)
 		atomic.AddInt64(&s.skipped, 1)
 	}
+
+}
+
+func (s *Spender) spendKnownKey(ctx context.Context, tx *wire.MsgTx) {
+	for _, in := range tx.TxIn {
+		/* TODO:
+		Check if this input is a known key
+		if so get the original transaction it was originally associated to
+		and consider caching the transaction for future reference
+
+		if the input is a known input keep track of the PKScript and output value
+
+		*/
+		outTx, err := s.cli.GetTransaction(ctx, in.PreviousOutPoint.Hash)
+		if err != nil {
+			return
+		}
+		_ = outTx
+	}
+
+	/*
+		TODO: calculate the fee on this transaction and
+			make sure our FEE can beat theirs by 5 VBytes
+
+		If any of the inputs are a multi sig key we'll want to make sure
+		the address for that key exists in our secret store. If it doesn't
+		exist we'll add it; consider adding a method to secret store to simplify this?
+
+
+		If we get to this point sign the transaction and publish it
+	*/
 
 }
 
@@ -489,6 +532,34 @@ func (s *Spender) classifyTx(tx *wire.MsgTx) TxClassification {
 		return UnSpendable
 	}
 
+	for _, in := range tx.TxIn {
+		parsed := NewParsedScript(in.SignatureScript, in.Witness...)
+		key, _ := parsed.PublicKeyRaw()
+		if key != nil && len(key) == 33 {
+			if _, found := s.knownKeys[[33]byte(key)]; found {
+				return SpentKnownKey
+			}
+			continue
+		}
+
+		keys, minKeys, _ := parsed.MultiSigKeysRaw()
+		if len(keys) == 0 {
+			continue
+		}
+
+		var known int
+		for _, k := range keys {
+			if _, found := s.knownKeys[[33]byte(k)]; found {
+				known++
+			}
+		}
+
+		if known >= minKeys {
+			return SpentKnownKey
+		}
+
+	}
+
 	s.addressMapMu.RLock()
 	addressNil := s.addressMap == nil
 	s.addressMapMu.RUnlock()
@@ -563,8 +634,24 @@ func (s *Spender) classifyTx(tx *wire.MsgTx) TxClassification {
 	return UnSpendable
 }
 
+func isWeakSpend(script []byte, witnesses ...[]byte) bool {
+	if len(witnesses) == 0 {
+		info := parseScript(script)
+		if info.IsPushOnly {
+
+		}
+	}
+
+	return false
+}
+
 // isReplayable checks if a script is replayable
 func isReplayable(script []byte, witnesses ...[]byte) bool {
+	parsed := NewParsedScript(script, witnesses...)
+	if parsed.IsP2WPKH() || parsed.IsP2PKH() {
+		return false
+	}
+
 	var (
 		ops          []byte
 		redeemScript []byte
@@ -605,11 +692,6 @@ func isReplayable(script []byte, witnesses ...[]byte) bool {
 		return false
 	}
 
-	// this matches the P2PKH Signature
-	if len(ops) == 2 && bytes.Equal(ops, []byte{txscript.OP_DATA_71, txscript.OP_DATA_33}) {
-		return false
-	}
-
 redeemStep:
 	ops = nil
 	tok = txscript.MakeScriptTokenizer(0, redeemScript)
@@ -620,11 +702,15 @@ redeemStep:
 			txscript.OP_CHECKSIGVERIFY, txscript.OP_CHECKSIGADD:
 			// if this script has any sig operations we can't use it
 			return false
+		case txscript.OP_NOP4, txscript.OP_NOP5, txscript.OP_NOP6, txscript.OP_NOP7,
+			txscript.OP_NOP8, txscript.OP_NOP9, txscript.OP_NOP10:
+			return false
 		}
 		if lastOp > txscript.OP_CHECKSIGADD {
 			// if we're here odds are we are dealing with a P2PKH
 			return false
 		}
+
 		ops = append(ops, lastOp)
 	}
 	if tok.Err() != nil || lastOp == txscript.OP_RETURN {
@@ -650,4 +736,5 @@ const (
 	ReplayableSimpleInput
 	WeakKey
 	EnemyWeakKey
+	SpentKnownKey
 )

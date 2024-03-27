@@ -228,7 +228,7 @@ func (s *Spender) SpendAddress(ctx context.Context, address string) error {
 }
 
 func (s *Spender) Start(ctx context.Context) {
-	t := time.NewTicker(5 * time.Second)
+	t := time.NewTicker(time.Minute)
 	f, e := s.cli.GetFee(ctx)
 	if e == nil {
 		s.feeMu.Lock()

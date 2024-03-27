@@ -103,7 +103,7 @@ func (p ParsedScript) AssumePKScript() ([]byte, error) {
 
 func (p ParsedScript) IsSegwitMultiSig() bool {
 	totalOps := len(p.Ops)
-	if totalOps == 0 || p.IsPushOnly {
+	if totalOps < 4 || p.IsPushOnly {
 		return false
 	}
 

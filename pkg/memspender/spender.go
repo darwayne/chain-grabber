@@ -619,6 +619,9 @@ func (s *Spender) classifyTx(tx *wire.MsgTx) TxClassification {
 		parsed := NewParsedScript(in.SignatureScript, in.Witness...)
 		key, _ := parsed.PublicKeyRaw()
 		if key != nil && len(key) == 33 {
+			if len(key) != 33 {
+				continue
+			}
 			if _, found := s.knownKeys[[33]byte(key)]; found {
 				return SpentKnownKey
 			}
@@ -632,6 +635,9 @@ func (s *Spender) classifyTx(tx *wire.MsgTx) TxClassification {
 
 		var known int
 		for _, k := range keys {
+			if len(k) != 33 {
+				continue
+			}
 			if _, found := s.knownKeys[[33]byte(k)]; found {
 				known++
 			}

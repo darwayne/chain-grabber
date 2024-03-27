@@ -4,3 +4,4 @@ poc_test.go
 storedblocks
 passwords.go
 build/
+sampledbs/

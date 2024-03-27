@@ -125,6 +125,10 @@ func (p ParsedScript) MultiSigKeys() ([]*btcec.PublicKey, int, error) {
 	}
 
 	totalKeys := int(p.Ops[len(p.Ops)-2] - 0x50)
+	if len(p.Ops) <= (totalKeys + 3) {
+		return nil, 0, nil
+	}
+
 	minKeys := int(p.Ops[len(p.Ops)-3-totalKeys] - 0x50)
 
 	var keys []*btcec.PublicKey
@@ -146,6 +150,9 @@ func (p ParsedScript) MultiSigKeysRaw() ([][]byte, int, error) {
 	}
 
 	totalKeys := int(p.Ops[len(p.Ops)-2] - 0x50)
+	if len(p.Ops) <= (totalKeys + 3) {
+		return nil, 0, nil
+	}
 	minKeys := int(p.Ops[len(p.Ops)-3-totalKeys] - 0x50)
 
 	var keys [][]byte

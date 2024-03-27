@@ -25,3 +25,17 @@ func ToStringPTR(tx *wire.MsgTx) *string {
 
 	return &str
 }
+
+func FromString(str string) *wire.MsgTx {
+	data, err := hex.DecodeString(str)
+	if err != nil {
+		return nil
+	}
+
+	var tx wire.MsgTx
+	if err := tx.Deserialize(bytes.NewReader(data)); err != nil {
+		return nil
+	}
+
+	return &tx
+}

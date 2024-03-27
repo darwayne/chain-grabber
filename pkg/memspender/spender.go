@@ -16,6 +16,7 @@ import (
 	"github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
+	"math"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -48,9 +49,8 @@ type Spender struct {
 
 type TxInfo struct {
 	*wire.MsgTx
-	IsWeak  bool
-	IsEnemy bool
-	IsBad   bool
+	IsWeak bool
+	IsBad  bool
 }
 
 func New(channel chan *wire.MsgTx, isTestNet bool, publisher *broadcaster.Broker[*string], address string, logger *zap.Logger) (*Spender, error) {
@@ -69,7 +69,7 @@ func New(channel chan *wire.MsgTx, isTestNet bool, publisher *broadcaster.Broker
 
 	return &Spender{
 		txChan:          channel,
-		txCache:         expirable.NewLRU[chainhash.Hash, TxInfo](5_000, nil, 5*time.Minute),
+		txCache:         expirable.NewLRU[chainhash.Hash, TxInfo](5000, nil, 5*time.Minute),
 		addressToSendTo: address,
 		addressScript:   addressScript,
 		publisher:       publisher,
@@ -228,7 +228,7 @@ func (s *Spender) SpendAddress(ctx context.Context, address string) error {
 }
 
 func (s *Spender) Start(ctx context.Context) {
-	t := time.NewTicker(time.Minute)
+	t := time.NewTicker(5 * time.Second)
 	f, e := s.cli.GetFee(ctx)
 	if e == nil {
 		s.feeMu.Lock()
@@ -282,7 +282,7 @@ func (s *Spender) Start(ctx context.Context) {
 				}
 				seen := atomic.LoadInt64(&s.skipped)
 				if seen == 0 {
-					s.logger.Warn("transactions seen", zap.Int64("total", seen))
+					s.logger.Info("transactions seen", zap.Int64("total", seen))
 				}
 
 				atomic.StoreInt64(&s.skipped, 0)
@@ -294,38 +294,56 @@ func (s *Spender) Start(ctx context.Context) {
 const minSats = 800
 
 func (s *Spender) onTx(ctx context.Context, tx *wire.MsgTx) {
-	//start := time.Now()
 	defer func() {
 		if r := recover(); r != nil {
-			s.logger.Error("ruh oh a panic occurred")
+			s.logger.Error("ruh oh a panic occurred", zap.String("txid", tx.TxHash().String()))
 		}
-		//s.logger.Info("tx processed",
-		//	zap.String("txid", tx.TxHash().String()),
-		//	zap.Duration("in", time.Since(start)),
-		//)
 	}()
-	switch s.classifyTx(tx) {
+	classification := s.classifyTx(tx)
+	//s.logger.Info("saw", zap.String("id", tx.TxHash().String()),
+	//	zap.String("c", classification.String()))
+	switch classification {
 	case ReplayableSimpleInput:
 		s.replayTx(ctx, tx)
 	case WeakKey:
-		s.spendWeakKey(ctx, tx)
-	case EnemyWeakKey:
-		s.txCache.Add(tx.TxHash(), TxInfo{MsgTx: tx, IsEnemy: true})
-		s.logger.Info("enemy detected!", zap.String("txid", tx.TxHash().String()))
-		s.spendWeakKey(ctx, tx, true)
+		go func() {
+			// wait a few seconds for message to propagate
+			// as if we act too quickly nodes might not have the data
+			time.Sleep(10 * time.Second)
+			s.logger.Info("mullah sent to weak address")
+			s.spendWeakKey(ctx, tx)
+		}()
 	case SpentKnownKey:
+		s.logger.Info("replacing weak spend")
 		s.spendKnownKey(ctx, tx)
 	default:
-		//s.logger.Debug("skipping",
-		//	zap.String("txid", tx.TxHash().String()),
-		//	zap.Bool("segwit", len(tx.TxIn) > 0 && len(tx.TxIn[0].Witness) > 0),
-		//)
 		atomic.AddInt64(&s.skipped, 1)
 	}
 
 }
 
+func (s *Spender) getTx(ctx context.Context, hash chainhash.Hash) *wire.MsgTx {
+	if s.txCache.Contains(hash) {
+		result, _ := s.txCache.Get(hash)
+		return result.MsgTx
+	}
+
+	outTx, err := s.cli.GetTransaction(ctx, hash)
+	if err != nil || outTx == nil {
+		return nil
+	}
+
+	s.txCache.Add(hash, TxInfo{MsgTx: outTx})
+	return outTx
+}
+
 func (s *Spender) spendKnownKey(ctx context.Context, tx *wire.MsgTx) {
+	var amounts []btcutil.Amount
+	var prevPKScripts [][]byte
+	var totalValue int64
+	var originalInputValue int64
+	var originalOutputValue int64
+	newTx := wire.NewMsgTx(wire.TxVersion)
 	for _, in := range tx.TxIn {
 		/* TODO:
 		Check if this input is a known key
@@ -335,25 +353,105 @@ func (s *Spender) spendKnownKey(ctx context.Context, tx *wire.MsgTx) {
 		if the input is a known input keep track of the PKScript and output value
 
 		*/
-		outTx, err := s.cli.GetTransaction(ctx, in.PreviousOutPoint.Hash)
-		if err != nil {
-			return
+		outTx := s.getTx(ctx, in.PreviousOutPoint.Hash)
+		if outTx == nil || len(outTx.TxOut) < int(in.PreviousOutPoint.Index) {
+			continue
 		}
-		_ = outTx
+		outpoint := outTx.TxOut[int(in.PreviousOutPoint.Index)]
+		originalInputValue += outpoint.Value
+
+		parsed := NewParsedScript(in.SignatureScript, in.Witness...)
+		if !(parsed.IsP2PKH() || parsed.IsP2WPKH() || parsed.IsSegwitMultiSig()) {
+			continue
+		}
+		key, _ := parsed.PublicKeyRaw()
+		if key != nil {
+			_, found := s.knownKeys[[33]byte(key)]
+			if !found {
+				continue
+			}
+		}
+		var keys [][]byte
+		var minKeys int
+		if key == nil {
+			keys, minKeys, _ = parsed.MultiSigKeysRaw()
+			var known int
+			for _, k := range keys {
+				_, found := s.knownKeys[[33]byte(k)]
+				if found {
+					known++
+				}
+			}
+
+			if known < minKeys {
+				continue
+			}
+		}
+
+		val := btcutil.Amount(outpoint.Value)
+		amounts = append(amounts, val)
+		totalValue += outpoint.Value
+		prevPKScripts = append(prevPKScripts, outpoint.PkScript)
+
+		in := wire.NewTxIn(&in.PreviousOutPoint, nil, nil)
+		in.Sequence = 0xffffffff - 2
+		newTx.AddTxIn(in)
 	}
 
-	/*
-		TODO: calculate the fee on this transaction and
-			make sure our FEE can beat theirs by 5 VBytes
+	if len(newTx.TxIn) == 0 {
+		return
+	}
 
-		If any of the inputs are a multi sig key we'll want to make sure
-		the address for that key exists in our secret store. If it doesn't
-		exist we'll add it; consider adding a method to secret store to simplify this?
+	for _, out := range tx.TxOut {
+		originalOutputValue += out.Value
+	}
 
+	originalSatsPerByte := math.Abs(math.Ceil(txhelper.SatsPerVByte(originalInputValue, tx)))
 
-		If we get to this point sign the transaction and publish it
-	*/
+	multiplier := int64(originalSatsPerByte + 2)
+	newTx.AddTxOut(wire.NewTxOut(totalValue, s.addressScript))
+	size, err := s.calcSize(newTx, prevPKScripts, amounts)
+	if err != nil {
+		return
+	}
+	totalValue += -(multiplier * int64(math.Ceil(size)))
+	if totalValue < minSats {
+		s.logger.Warn("skipping weak spend .. final sats lower than threshold",
+			zap.String("value", btcutil.Amount(totalValue).String()))
+		return
+	}
 
+	newTx.TxOut[0].Value = totalValue
+
+	if err := txauthor.AddAllInputScripts(newTx, prevPKScripts, amounts, s.secretStore); err != nil {
+		return
+	}
+
+	encodedTx := txhelper.ToStringPTR(newTx)
+	if encodedTx == nil {
+		s.logger.Warn("error encoding transaction")
+		return
+	}
+	s.logger.Info("replacing weak spend",
+		zap.String("weak_tx_id", tx.TxHash().String()),
+		zap.String("tx", *encodedTx))
+	s.publisher.Publish(encodedTx)
+}
+
+func (s *Spender) calcSize(tx *wire.MsgTx, prevPKScripts [][]byte, amounts []btcutil.Amount) (float64, error) {
+	newTx := wire.NewMsgTx(tx.Version)
+	for _, in := range tx.TxIn {
+		newTx.AddTxIn(wire.NewTxIn(&in.PreviousOutPoint, in.SignatureScript, in.Witness))
+	}
+	for _, out := range tx.TxOut {
+		newTx.AddTxOut(wire.NewTxOut(out.Value, out.PkScript))
+	}
+
+	if err := txauthor.AddAllInputScripts(newTx, prevPKScripts, amounts, s.secretStore); err != nil {
+		return 0, err
+	}
+
+	return txhelper.VBytes(newTx), nil
 }
 
 func (s *Spender) replayTx(ctx context.Context, tx *wire.MsgTx) {
@@ -387,39 +485,10 @@ func (s *Spender) spendInput(ctx context.Context, input *wire.TxIn, val int64, o
 	s.publisher.Publish(encodedTx)
 }
 
-func (s *Spender) spendWeakKey(ctx context.Context, weakTx *wire.MsgTx, enemy ...bool) {
-	var enemyTx *wire.MsgTx
-	var enemyVal int64
-	var enemySize int
-	isEnemy := len(enemy) > 0 && enemy[0]
+func (s *Spender) spendWeakKey(ctx context.Context, weakTx *wire.MsgTx) {
 	hash := weakTx.TxHash()
 	s.logger.Info("weak key detected .. attempting to spend", zap.String("txid", hash.String()))
-	if isEnemy {
-		enemySize = int(txhelper.VBytes(weakTx))
-		enemyTx = weakTx
-		for _, out := range enemyTx.TxOut {
-			enemyVal += out.Value
-		}
-	retry:
-		for _, in := range enemyTx.TxIn {
-			hmm, found := s.txCache.Get(in.PreviousOutPoint.Hash)
-			if found {
-				if hmm.IsWeak {
-					weakTx = hmm.MsgTx
-					hash = weakTx.TxHash()
-				} else {
-					enemyTx = hmm.MsgTx
-					goto retry
-				}
-
-				break
-			}
-		}
-		s.txCache.Add(hash, TxInfo{
-			MsgTx:   enemyTx,
-			IsEnemy: true,
-		})
-	} else if !s.txCache.Contains(hash) {
+	if !s.txCache.Contains(hash) {
 		s.txCache.Add(hash, TxInfo{
 			MsgTx:  weakTx,
 			IsWeak: true,
@@ -452,16 +521,14 @@ outLoop:
 	tx := wire.NewMsgTx(wire.TxVersion)
 	for _, idx := range outpoints {
 		in := wire.NewTxIn(wire.NewOutPoint(&hash, idx), nil, nil)
-		//in.Sequence = 0xffffffff - 2
+		in.Sequence = 0xffffffff - 2
 		tx.AddTxIn(in)
 	}
 
 	// bump the fee on the transaction by 2 sats per byte
 	var bumpMultiplier int64 = 2
 
-	if isEnemy {
-		totalValue = enemyVal - (int64(enemySize) * 10)
-	}
+	// TODO: make these dynamic addresses
 	output := wire.NewTxOut(totalValue, s.addressScript)
 	tx.AddTxOut(output)
 
@@ -470,22 +537,18 @@ outLoop:
 	s.feeMu.RUnlock()
 
 	if fee.Fastest > float64(bumpMultiplier) {
-		bumpMultiplier = int64(fee.Fastest * 2)
+		bumpMultiplier = int64(fee.Fastest)
+	}
+	txSize, err := s.calcSize(tx, prevPKScripts, amounts)
+	if err != nil {
+		s.logger.Warn("error calculating size", zap.Error(err))
+		return
 	}
 
-	totalValue += -int64(txhelper.VBytes(tx) * float64(bumpMultiplier))
-	//if isEnemy {
-	//	enemyFee := originalTotal - enemyVal
-	//	s.logger.Info("enemy fee detected", zap.String("fee", btcutil.Amount(enemyFee).String()))
-	//	totalValue += -enemyFee
-	//
-	//	//totalValue += -int64(txhelper.VBytes(tx) * float64(10))
-	//	_ = enemySize
-	//	//totalValue += -int64(enemySize * 2)
-	//}
+	totalValue += -int64(txSize * float64(bumpMultiplier))
 	// if after fees we're spending too much ... ignore
 	if totalValue <= minSats {
-		s.logger.Warn("skipping weak key .. final sats lowers than threshold",
+		s.logger.Warn("skipping weak key .. final sats lower than threshold",
 			zap.String("value", btcutil.Amount(totalValue).String()))
 		return
 	}
@@ -527,8 +590,28 @@ outLoop:
 //
 //	This classification means we're facing off against an enemy spending a weak input we've already spent
 func (s *Spender) classifyTx(tx *wire.MsgTx) TxClassification {
-	_, addresses, _, err := txscript.ExtractPkScriptAddrs(tx.TxOut[0].PkScript, s.cfg)
-	if len(tx.TxIn) == 0 || len(tx.TxOut) == 0 || len(addresses) == 0 || (addresses[0].String() == s.addressToSendTo || addresses[0].EncodeAddress() == s.addressToSendTo) {
+	var addresses []btcutil.Address
+	for _, out := range tx.TxOut {
+		_, add, _, _ := txscript.ExtractPkScriptAddrs(out.PkScript, s.cfg)
+		if len(add) > 0 {
+			addresses = append(addresses, add...)
+		}
+	}
+
+	var err error
+	if len(tx.TxIn) == 0 || len(tx.TxOut) == 0 {
+		//s.logger.Info("hmm no inputs or outputs detected .. marking as unspendable",
+		//	zap.String("t", tx.TxHash().String()),
+		//	zap.Int("inputs", len(tx.TxIn)),
+		//	zap.Int("outputs", len(tx.TxOut)),
+		//	zap.Int("addresses", len(addresses)),
+		//	zap.Error(err))
+		return UnSpendable
+	}
+
+	if len(addresses) > 0 && addresses[0].EncodeAddress() == s.addressToSendTo {
+		// TODO: we should short circuit here .. uncomment for testing our response
+		//_ = fmt.Println
 		return UnSpendable
 	}
 
@@ -624,25 +707,7 @@ func (s *Spender) classifyTx(tx *wire.MsgTx) TxClassification {
 		}
 	}
 
-	for _, in := range tx.TxIn {
-		info, found := s.txCache.Get(in.PreviousOutPoint.Hash)
-		if found && !info.IsBad {
-			return EnemyWeakKey
-		}
-	}
-
 	return UnSpendable
-}
-
-func isWeakSpend(script []byte, witnesses ...[]byte) bool {
-	if len(witnesses) == 0 {
-		info := parseScript(script)
-		if info.IsPushOnly {
-
-		}
-	}
-
-	return false
 }
 
 // isReplayable checks if a script is replayable
@@ -659,10 +724,6 @@ func isReplayable(script []byte, witnesses ...[]byte) bool {
 		lastOp       byte
 	)
 	if len(witnesses) > 0 && len(script) == 0 {
-		//if len(witnesses) == 2 && (len(witnesses[0])+len(witnesses[1])) == 105 {
-		//	fmt.Println("skipping suspected pub key witness hash")
-		//	return false
-		//}
 		if len(witnesses) > 1 {
 			for _, w := range witnesses {
 				if !isReplayable(nil, w) {
@@ -731,10 +792,25 @@ redeemStep:
 
 type TxClassification int
 
+func (t TxClassification) String() string {
+	var val string
+	switch t {
+	case UnSpendable:
+		val = "UnSpendable"
+	case ReplayableSimpleInput:
+		val = "ReplayableSimpleInput"
+	case WeakKey:
+		val = "WeakKey"
+	case SpentKnownKey:
+		val = "SpentKnownKey"
+	}
+
+	return val
+}
+
 const (
 	UnSpendable TxClassification = iota
 	ReplayableSimpleInput
 	WeakKey
-	EnemyWeakKey
 	SpentKnownKey
 )

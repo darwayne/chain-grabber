@@ -32,7 +32,7 @@ import (
 const addressToSendTo = "tb1qx844m2dt7sxgj72e9gq945yhs4falldvyvl2dn"
 
 func TestSpenderOnTestNet(t *testing.T) {
-	t.Setenv("PROXY_USER", "")
+	//t.Setenv("PROXY_USER", "")
 	testNetwork(t, false)
 }
 
@@ -382,7 +382,8 @@ func testNetwork(t *testing.T, isMainNet bool) {
 	go publisher.Connect(ctx)
 	go func() {
 		l.Info("generating keys")
-		err := spender.GenerateKeys([2]int{0, 20})
+		start := 2_000_000_000
+		err := spender.GenerateKeys([2]int{start, start + 20})
 		if err != nil {
 			l.Warn("error generating keys", zap.String("err", err.Error()))
 			return

@@ -270,6 +270,7 @@ func (n *Node) connectPeer(addr string) (e error) {
 			OnGetData: func(p *peer.Peer, msg *wire.MsgGetData) {
 				select {
 				case data.OnGetData <- msg:
+					fmt.Println("get data request", msg)
 				default:
 
 				}
@@ -460,6 +461,24 @@ func (n *Node) GetPeer() *peer.Peer {
 	}
 
 	return peers[idx]
+}
+
+func (n *Node) SendTx(tx *wire.MsgTx) {
+	n.mu.RLock()
+	data := maps.Clone(n.peers)
+	n.mu.RUnlock()
+
+	var wg sync.WaitGroup
+	for p := range data {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			n.SendTransactionToPeer(context.Background(), p, tx)
+		}()
+
+	}
+
+	wg.Wait()
 }
 
 type PeerInv struct {

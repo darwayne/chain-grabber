@@ -10,13 +10,15 @@ import (
 	"github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/hashicorp/golang-lru/v2/simplelru"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 type Monitor struct {
-	mu     sync.Mutex
-	cache  simplelru.LRUCache[chainhash.Hash, struct{}]
-	broker *broadcaster.Broker[*wire.MsgTx]
+	mu        sync.Mutex
+	cache     simplelru.LRUCache[chainhash.Hash, struct{}]
+	broker    *broadcaster.Broker[*wire.MsgTx]
+	connected int64
 
 	queueMu sync.RWMutex
 	queue   []*wire.MsgTx
@@ -65,6 +67,7 @@ func (m *Monitor) Start(ctx context.Context, node *lightnode.Node) {
 
 			for _, tx := range txs {
 				hash := tx.TxHash()
+
 				if m.cache.Contains(hash) {
 					continue
 				}
@@ -95,12 +98,17 @@ func (m *Monitor) onPeerConnected(ctx context.Context, node *lightnode.Node, pee
 	if data == nil {
 		return
 	}
+	total := atomic.AddInt64(&m.connected, 1)
+	//fmt.Println("peer connected", peer, ".. total connected", total)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-data.Disconnected:
+			total = atomic.AddInt64(&m.connected, -1)
+			_ = total
+			//fmt.Println("peer disconnected", peer, ".. total connected", total)
 			return
 		case tx := <-data.OnTX:
 			m.queueMu.Lock()

@@ -34,7 +34,8 @@ func GenerateKeys(start, end int, params *chaincfg.Params) (GeneratedKey, error)
 				mod.Zero()
 				mod.SetInt(uint32(i))
 				key := btcec.PrivKeyFromScalar(&mod)
-				for idx, compressed := range []bool{false, true} {
+				for _, compressed := range []bool{false, true} {
+
 					num += 0.01
 					addr, err := PrivToPubKeyHash(key, compressed, params)
 					if err != nil {
@@ -49,19 +50,9 @@ func GenerateKeys(start, end int, params *chaincfg.Params) (GeneratedKey, error)
 					m[addr.EncodeAddress()] = wif
 					order[addr.EncodeAddress()] = num
 
-					num += 0.01
-					addr, err = PrivToSegwit(key, compressed, params)
-					if err != nil {
-						errChan <- err
-						return
-					}
-
-					m[addr.EncodeAddress()] = wif
-					order[addr.EncodeAddress()] = num
-
-					if i != 0 && idx == 0 {
+					if compressed {
 						num += 0.01
-						addr, err = PrivToTaprootPubKey(key, params)
+						addr, err = PrivToSegwit(key, compressed, params)
 						if err != nil {
 							errChan <- err
 							return
@@ -69,7 +60,20 @@ func GenerateKeys(start, end int, params *chaincfg.Params) (GeneratedKey, error)
 
 						m[addr.EncodeAddress()] = wif
 						order[addr.EncodeAddress()] = num
+
+						if i != 0 {
+							num += 0.01
+							addr, err = PrivToTaprootPubKey(key, params)
+							if err != nil {
+								errChan <- err
+								return
+							}
+
+							m[addr.EncodeAddress()] = wif
+							order[addr.EncodeAddress()] = num
+						}
 					}
+
 				}
 			}
 

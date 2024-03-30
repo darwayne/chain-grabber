@@ -10,18 +10,22 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/darwayne/chain-grabber/internal/core/blockchain/mempoolspace"
-	"github.com/darwayne/chain-grabber/internal/core/grabber"
 	"github.com/darwayne/chain-grabber/pkg/broadcaster"
 	"github.com/darwayne/chain-grabber/pkg/txhelper"
 	"github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
 	"math"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 )
+
+type secretStore interface {
+	txauthor.SecretsSource
+	HasAddress(address btcutil.Address) (bool, error)
+	HasKnownCompressedKey(key []byte) (bool, error)
+}
 
 type Spender struct {
 	txChan          <-chan *wire.MsgTx
@@ -34,11 +38,7 @@ type Spender struct {
 	cli             *mempoolspace.Rest
 	txCache         *expirable.LRU[chainhash.Hash, TxInfo]
 
-	addressMapMu sync.RWMutex
-	addressMap   map[string]*btcutil.WIF
-	addressOrder map[float64]string
-	knownKeys    map[[33]byte]*btcutil.WIF
-	secretStore  grabber.MemorySecretStore
+	secretStore secretStore
 
 	transMu          sync.RWMutex
 	seenTransactions []*wire.MsgTx
@@ -79,66 +79,8 @@ func New(channel chan *wire.MsgTx, isTestNet bool, publisher *broadcaster.Broker
 	}, nil
 }
 
-func (s *Spender) SetSecrets(keyMap map[string]*btcutil.WIF) {
-	s.secretStore = grabber.NewMemorySecretStore(keyMap, s.cfg)
-}
-
-func (s *Spender) GenerateKeys(keyRange [2]int) error {
-	knownPrivateKeys := []string{
-		"92Pg46rUhgTT7romnV7iGW6W1gbGdeezqdbJCzShkCsYNzyyNcc",
-		"91izeJtyQ1DNGkiRtMGRKBEKYQTX46Ug8mGtKWpX9mDKqArsLpH",
-		"cNTENqF7rLCZvzYDfbQ6skk4A5KTq7qV3hKV7i1Hb6KRnX6MdqWa",
-		"cNV8spCBYY4eu1aVpUZzVMyLyKZ18kDtKVaTyCnMBxKdAxftXwQZ",
-	}
-
-	gen, err := grabber.GenerateKeys(keyRange[0], keyRange[1], s.cfg)
-	if err != nil {
-		return err
-	}
-
-	for idx, encodedWif := range knownPrivateKeys {
-		wif, err := btcutil.DecodeWIF(encodedWif)
-		if err != nil {
-			return err
-		}
-		num := float64(idx) - 1
-
-		key := wif.PrivKey
-		for _, compressed := range []bool{false, true} {
-			num -= 0.01
-			addr, err := grabber.PrivToPubKeyHash(key, compressed, s.cfg)
-			if err != nil {
-				return err
-			}
-			wif, err := btcutil.NewWIF(key, s.cfg, compressed)
-			if err != nil {
-				return err
-			}
-			if compressed {
-				result := [33]byte(key.PubKey().SerializeCompressed())
-				gen.KnownKeys[result] = wif
-			}
-			addrStr := addr.EncodeAddress()
-			gen.AddressKeyMap[addrStr] = wif
-			gen.AddressOrder[addrStr] = num
-		}
-	}
-
-	arr := make([]string, 0)
-	for address := range gen.AddressOrder {
-		arr = append(arr, address)
-	}
-
-	sort.Slice(arr, func(i, j int) bool {
-		return gen.AddressOrder[arr[i]] < gen.AddressOrder[arr[j]]
-	})
-
-	s.addressMapMu.Lock()
-	defer s.addressMapMu.Unlock()
-	s.knownKeys = gen.KnownKeys
-	s.addressMap = gen.AddressKeyMap
-	s.secretStore = grabber.NewMemorySecretStore(gen.AddressKeyMap, s.cfg)
-	return nil
+func (s *Spender) SetSecrets(store secretStore) {
+	s.secretStore = store
 }
 
 func (s *Spender) SpendAddress(ctx context.Context, address string) error {
@@ -209,9 +151,7 @@ func (s *Spender) SpendAddress(ctx context.Context, address string) error {
 	}
 
 	tx.AddTxOut(wire.NewTxOut(totalValue, s.addressScript))
-	s.addressMapMu.RLock()
 	store := s.secretStore
-	s.addressMapMu.RUnlock()
 	if err := txauthor.AddAllInputScripts(tx, prevPKScripts, amounts, store); err != nil {
 		return err
 	}
@@ -299,9 +239,9 @@ func (s *Spender) onTx(ctx context.Context, tx *wire.MsgTx) {
 			s.logger.Error("ruh oh a panic occurred", zap.String("txid", tx.TxHash().String()))
 		}
 	}()
+
 	classification := s.classifyTx(tx)
-	//s.logger.Info("saw", zap.String("id", tx.TxHash().String()),
-	//	zap.String("c", classification.String()))
+	//s.logger.Info("saw", zap.String("id", tx.TxHash().String()), zap.String("c", classification.String()))
 	switch classification {
 	case ReplayableSimpleInput:
 		s.replayTx(ctx, tx)
@@ -366,7 +306,7 @@ func (s *Spender) spendKnownKey(ctx context.Context, tx *wire.MsgTx) {
 		}
 		key, _ := parsed.PublicKeyRaw()
 		if key != nil {
-			_, found := s.knownKeys[[33]byte(key)]
+			found, _ := s.secretStore.HasKnownCompressedKey(key)
 			if !found {
 				continue
 			}
@@ -377,7 +317,7 @@ func (s *Spender) spendKnownKey(ctx context.Context, tx *wire.MsgTx) {
 			keys, minKeys, _ = parsed.MultiSigKeysRaw()
 			var known int
 			for _, k := range keys {
-				_, found := s.knownKeys[[33]byte(k)]
+				found, _ := s.secretStore.HasKnownCompressedKey(k)
 				if found {
 					known++
 				}
@@ -508,7 +448,7 @@ outLoop:
 		}
 
 		for _, addr := range addresses {
-			if _, found := s.addressMap[addr.String()]; found {
+			if found, _ := s.secretStore.HasAddress(addr); found {
 				prevPKScripts = append(prevPKScripts, out.PkScript)
 				amounts = append(amounts, btcutil.Amount(out.Value))
 				totalValue += out.Value
@@ -554,9 +494,7 @@ outLoop:
 	}
 	output.Value = totalValue
 
-	s.addressMapMu.RLock()
 	store := s.secretStore
-	s.addressMapMu.RUnlock()
 	if err := txauthor.AddAllInputScripts(tx, prevPKScripts, amounts, store); err != nil {
 		s.logger.Warn("error signing transaction", zap.String("err", err.Error()))
 		return
@@ -590,6 +528,9 @@ outLoop:
 //
 //	This classification means we're facing off against an enemy spending a weak input we've already spent
 func (s *Spender) classifyTx(tx *wire.MsgTx) TxClassification {
+	//if tx.TxHash().String() == "3a07f80c6c1b1032286f2668a202d3f526881f87ae3e0278c6395b77ed09078b" {
+	//	_ = fmt.Println
+	//}
 	var addresses []btcutil.Address
 	for _, out := range tx.TxOut {
 		_, add, _, _ := txscript.ExtractPkScriptAddrs(out.PkScript, s.cfg)
@@ -622,7 +563,8 @@ func (s *Spender) classifyTx(tx *wire.MsgTx) TxClassification {
 			if len(key) != 33 {
 				continue
 			}
-			if _, found := s.knownKeys[[33]byte(key)]; found {
+			found, _ := s.secretStore.HasKnownCompressedKey(key)
+			if found {
 				return SpentKnownKey
 			}
 			continue
@@ -638,7 +580,8 @@ func (s *Spender) classifyTx(tx *wire.MsgTx) TxClassification {
 			if len(k) != 33 {
 				continue
 			}
-			if _, found := s.knownKeys[[33]byte(k)]; found {
+			found, _ := s.secretStore.HasKnownCompressedKey(k)
+			if found {
 				known++
 			}
 		}
@@ -649,26 +592,12 @@ func (s *Spender) classifyTx(tx *wire.MsgTx) TxClassification {
 
 	}
 
-	s.addressMapMu.RLock()
-	addressNil := s.addressMap == nil
-	s.addressMapMu.RUnlock()
-
-	if addressNil {
-		s.addressMapMu.Lock()
-		s.addressMap = make(map[string]*btcutil.WIF)
-		s.addressMapMu.Unlock()
-	}
-	s.addressMapMu.RLock()
 	for _, address := range addresses {
-		for _, addr := range []string{address.String(), address.EncodeAddress()} {
-			if _, found := s.addressMap[addr]; found {
-				s.addressMapMu.RUnlock()
-				s.logger.Info("weak key detected", zap.String("address", addr))
-				return WeakKey
-			}
+		if found, _ := s.secretStore.HasAddress(address); found {
+			s.logger.Info("weak key detected", zap.String("address", address.EncodeAddress()))
+			return WeakKey
 		}
 	}
-	s.addressMapMu.RUnlock()
 
 	if len(tx.TxIn) == 1 && len(tx.TxOut) == 1 && (len(tx.TxIn[0].SignatureScript) > 0 || len(tx.TxIn[0].Witness) > 0) {
 		valid := isReplayable(tx.TxIn[0].SignatureScript, tx.TxIn[0].Witness...) && err == nil &&

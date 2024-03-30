@@ -10,6 +10,7 @@ import (
 	"github.com/darwayne/chain-grabber/internal/core/grabber"
 	"github.com/darwayne/chain-grabber/internal/test/testhelpers"
 	"github.com/darwayne/chain-grabber/pkg/broadcaster"
+	"github.com/darwayne/chain-grabber/pkg/keygen"
 	"github.com/darwayne/chain-grabber/pkg/txmonitor"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -74,9 +75,9 @@ func TestSegwitWeakKey(t *testing.T) {
 	spender, err := New(m.Subscribe(), true, pub, addressToUse, l)
 	require.NoError(t, err)
 
-	start := 2_000_000_000
-	err = spender.GenerateKeys([2]int{start, start + 20})
+	secretStore, err := keygen.NewReaderFromDir("./testdata/sampledbs", true)
 	require.NoError(t, err)
+	spender.SetSecrets(secretStore)
 
 	weakTx := testhelpers.TxFromHex(t, "02000000000101ac7e256964d21fe8d1bd20f80ec9bbf894e7eebae50aeb3f423eef7042b234220100000000fdffffff02b337000000000000160014076001132599b8cb8684983da30d9f0ac25a087ab9440000000000001600143a5c99484b29af9db75c85ed67380775ca1f60aa02473044022007a3c570e0b2e234d116f3f37b88cbe52650a14421216338abe1bb684d44cd8d02201462d8abead27673f37946d7bc674eb22180878607f2ecbdbdbb15bbb5f503960121032646e15301e8540cd0911414eb0c82db68d6af268609636226a476e032c1a04bad6c2700")
 	spender.spendWeakKey(context.Background(), weakTx)

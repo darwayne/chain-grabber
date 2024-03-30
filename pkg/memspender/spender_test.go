@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"github.com/btcsuite/btcd/blockchain"
@@ -15,16 +16,15 @@ import (
 	"github.com/darwayne/chain-grabber/internal/core/blockchain/mempoolspace"
 	"github.com/darwayne/chain-grabber/internal/test/testhelpers"
 	"github.com/darwayne/chain-grabber/pkg/broadcaster"
+	"github.com/darwayne/chain-grabber/pkg/keygen"
 	"github.com/darwayne/chain-grabber/pkg/memspender"
 	"github.com/darwayne/chain-grabber/pkg/sigutil"
 	"github.com/darwayne/chain-grabber/pkg/txhelper"
 	"github.com/darwayne/chain-grabber/pkg/txmonitor"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
-	"golang.org/x/sync/errgroup"
 	"hash"
 	"os"
-	"sync"
 	"testing"
 	"time"
 )
@@ -37,7 +37,7 @@ func TestSpenderOnTestNet(t *testing.T) {
 }
 
 func TestSpenderOnMainNet(t *testing.T) {
-	t.Setenv("PROXY_USER", "")
+	//t.Setenv("PROXY_USER", "")
 	testNetwork(t, true)
 }
 
@@ -355,8 +355,10 @@ func TestIt(t *testing.T) {
 func testNetwork(t *testing.T, isMainNet bool) {
 	m := txmonitor.New()
 
+	params := &chaincfg.TestNet3Params
 	addressToUse := addressToSendTo
 	if isMainNet {
+		params = &chaincfg.MainNetParams
 		addressToUse = os.Getenv("MAIN_NET_ADDRESS")
 		require.NotEmpty(t, addressToUse)
 	}
@@ -379,31 +381,20 @@ func testNetwork(t *testing.T, isMainNet bool) {
 	spender, err := memspender.New(m.Subscribe(), !isMainNet, publisher.Broker, addressToUse, l)
 	require.NoError(t, err)
 
+	db, err := sql.Open("sqlite3", "../keygen/testdata/sampledbs/keydbv2.sqlite")
+	require.NoError(t, err)
+	secretStore := keygen.NewSQLReader(db, params)
+
+	spender.SetSecrets(secretStore)
+	t.Cleanup(func() {
+		secretStore.Close()
+	})
+
 	go publisher.Connect(ctx)
-	go func() {
-		l.Info("generating keys")
-		start := 2_000_000_000
-		err := spender.GenerateKeys([2]int{start, start + 20})
-		if err != nil {
-			l.Warn("error generating keys", zap.String("err", err.Error()))
-			return
-		}
+	go spender.Start(ctx)
 
-		l.Info("key generation complete!")
-
-		go spender.Start(ctx)
-
-		go n.ConnectV2()
-		go m.Start(ctx, n)
-
-		// give enough time to get fee
-
-		//time.Sleep(5 * time.Second)
-		//l.Info("attempting to spend")
-		//err = spender.SpendAddress(context.Background(), "mkTG2b1eE2EJDeKRDqZtPgasECc9dJCVdG")
-		//l.Info("spend attempt complete")
-		//l.Error("error?", zap.Error(err))
-	}()
+	go n.ConnectV2()
+	go m.Start(ctx, n)
 
 	select {
 	case <-ctx.Done():
@@ -413,114 +404,4 @@ func testNetwork(t *testing.T, isMainNet bool) {
 	case <-sigutil.Done():
 		return
 	}
-}
-
-func getPublisher(t *testing.T, isTestNet bool, logger *zap.Logger) *broadcaster.Broker[*string] {
-	t.Helper()
-	broker := broadcaster.NewBroker[*string]()
-	go broker.Start()
-	addClientsToBroker(t, broker, isTestNet, logger)
-
-	return broker
-}
-
-func addClientsToBroker(t *testing.T, broker *broadcaster.Broker[*string], isTestNet bool, logger *zap.Logger) {
-	for _, c := range electrumClients(t, isTestNet, logger) {
-		cli := c
-		server := c.Server
-		go func() {
-			ticker := time.NewTicker(10 * time.Second)
-			sub := broker.Subscribe()
-			for {
-				select {
-				case msg := <-sub:
-					res, err := cli.Broadcast(*msg)
-					if err != nil {
-						logger.Warn("error broadcasting to node", zap.Error(err), zap.String("server", server))
-					} else {
-						logger.Info("successfully broadcasted", zap.String("txid", res),
-							zap.String("server", server))
-					}
-				case <-ticker.C:
-					_, err := cli.Ping()
-					if err != nil {
-						logger.Warn("error pinging reconnecting", zap.String("server", server))
-						cli.Reconnect()
-					} else {
-						//logger.Info("ping success", zap.String("server", server))
-					}
-
-				}
-			}
-		}()
-	}
-}
-
-func electrumClients(t *testing.T, isTestnet bool, logger *zap.Logger) []*broadcaster.ElectrumClient {
-	var addresses []string
-	if isTestnet {
-		addresses = append(addresses, knownTestNetElectrumNodes...)
-	} else {
-		addresses = append(addresses, knownMainNetElectrumNodes...)
-	}
-
-	var mu sync.RWMutex
-	var clients []*broadcaster.ElectrumClient
-	var group errgroup.Group
-
-	for _, address := range addresses {
-		server := address
-		group.Go(func() error {
-			cli := broadcaster.NewElectrumClient()
-			if err := cli.Connect(server); err != nil {
-				logger.Warn("error connecting", zap.Error(err),
-					zap.String("server", server))
-				return nil
-				//return err
-			}
-
-			mu.Lock()
-			clients = append(clients, cli)
-			mu.Unlock()
-
-			return nil
-		})
-	}
-
-	err := group.Wait()
-	require.NoError(t, err)
-
-	return clients
-}
-
-var knownTestNetElectrumNodes = []string{
-	"testnet.qtornado.com:51002",
-	"v22019051929289916.bestsrv.de:50002",
-	//"testnet.hsmiths.com:53012",
-	"blockstream.info:993",
-	"electrum.blockstream.info:60002",
-	"testnet.aranguren.org:51002",
-}
-
-var knownMainNetElectrumNodes = []string{
-	"xtrum.com:50002",
-	"blockstream.info:700",
-	"electrum.bitaroo.net:50002",
-	"electrum0.snel.it:50002",
-	"btc.electroncash.dk:60002",
-	"e.keff.org:50002",
-	//"2electrumx.hopto.me:56022",
-	"blkhub.net:50002",
-	"bolt.schulzemic.net:50002",
-	//"vmd71287.contaboserver.net:50002",
-	"smmalis37.ddns.net:50002",
-	"electrumx.alexridevski.net:50002",
-	//"f.keff.org:50002",
-	"mainnet.foundationdevices.com:50002",
-	//"assuredly.not.fyi:50002",
-	//"vmd104014.contaboserver.net:50002",
-	//"ex05.axalgo.com:50002",
-	//"exs.ignorelist.com:50002",
-	"eai.coincited.net:50002",
-	//"2ex.digitaleveryware.com:50002",
 }

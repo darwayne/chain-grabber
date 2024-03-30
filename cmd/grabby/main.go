@@ -2,15 +2,19 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"flag"
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/darwayne/chain-grabber/cmd/grabby/internal/passwords"
 	"github.com/darwayne/chain-grabber/internal/core/blockchain/lightnode"
 	"github.com/darwayne/chain-grabber/pkg/broadcaster"
+	"github.com/darwayne/chain-grabber/pkg/keygen"
 	"github.com/darwayne/chain-grabber/pkg/memspender"
 	"github.com/darwayne/chain-grabber/pkg/sigutil"
 	"github.com/darwayne/chain-grabber/pkg/txmonitor"
 	"go.uber.org/zap"
 	"os"
+	"path/filepath"
 )
 
 func main() {
@@ -18,8 +22,7 @@ func main() {
 	isTestNet := flag.Bool("test-net", true, "whether to connect to testnet or not")
 	proxyUser := flag.String("proxy-user", passwords.User, "proxy user to use")
 	proxyPass := flag.String("proxy-pass", passwords.Pass, "proxy pass to use")
-	keyStart := flag.Int("key-start", 1, "the private key to start with")
-	keyEnd := flag.Int("key-end", 100_000, "the private key to end with")
+	secretDir := flag.String("secrets-dir", "./grabby-db", "the directory where leveldb secrets are stored")
 	flag.Parse()
 
 	os.Setenv("PROXY_USER", *proxyUser)
@@ -39,9 +42,12 @@ func main() {
 
 	isMainNet := !*isTestNet
 	var n *lightnode.Node
+	var params *chaincfg.Params
 	if isMainNet {
+		params = &chaincfg.MainNetParams
 		n, err = lightnode.NewMainNet(l)
 	} else {
+		params = &chaincfg.TestNet3Params
 		n, err = lightnode.NewTestNet(l)
 	}
 	if err != nil {
@@ -54,22 +60,26 @@ func main() {
 		panic(err)
 	}
 
-	go func() {
-		l.Info("generating keys")
-		err := spender.GenerateKeys([2]int{*keyStart, *keyEnd})
-		if err != nil {
-			l.Warn("error generating keys", zap.String("err", err.Error()))
-			errChan <- err
-			return
-		}
+	info := filepath.Join(*secretDir, "keydbv2.sqlite")
+	db, err := sql.Open("sqlite3", info)
+	if err != nil {
+		panic(err)
+	}
+	defer db.Close()
 
-		l.Info("key generation complete!")
+	secretStore := keygen.NewSQLReader(db, params)
+	l.Info("running health check", zap.String("db", info))
+	if err := secretStore.HealthCheck(); err != nil {
+		l.Error("failed health check", zap.Error(err))
+		return
+	}
+	l.Info("health check passed")
+	spender.SetSecrets(secretStore)
 
-		go spender.Start(ctx)
+	go spender.Start(ctx)
 
-		go n.ConnectV2()
-		go m.Start(ctx, n)
-	}()
+	go n.ConnectV2()
+	go m.Start(ctx, n)
 
 	l.Info("INITIALIZED",
 		zap.String("address", *address),

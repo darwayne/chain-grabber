@@ -28,6 +28,7 @@ func NewReaderFromDir(dir string, isTestNet bool) (*Reader, error) {
 
 	db, err := leveldb.OpenFile(f, &opt.Options{
 		ErrorIfMissing: true,
+		ReadOnly:       true,
 	})
 	if err != nil {
 		return nil, err
@@ -44,7 +45,7 @@ func (r *Reader) Close() error {
 }
 
 func (r *Reader) GetKey(address btcutil.Address) (*btcec.PrivateKey, bool, error) {
-	raw, err := r.db.Get([]byte(address.EncodeAddress()), nil)
+	raw, err := r.db.Get([]byte("address:"+address.EncodeAddress()), nil)
 	if err != nil {
 		return nil, false, errors.Wrap(err, "error getting from db")
 	}
@@ -57,10 +58,29 @@ func (r *Reader) GetKey(address btcutil.Address) (*btcec.PrivateKey, bool, error
 	return wif.PrivKey, wif.CompressPubKey, nil
 }
 
+func (r *Reader) HasAddress(address btcutil.Address) (bool, error) {
+	return r.db.Has([]byte("address:"+address.EncodeAddress()), nil)
+}
+
 func (r *Reader) GetScript(address btcutil.Address) ([]byte, error) {
 	return txscript.PayToAddrScript(address)
 }
 
 func (r *Reader) ChainParams() *chaincfg.Params {
 	return r.params
+}
+
+func (r *Reader) HasKey(key []byte) (bool, error) {
+	key = append([]byte("key:"), key...)
+
+	found, err := r.db.Has(key, nil)
+
+	return found, errors.Wrap(err, "error getting from db")
+}
+
+func (r *Reader) HasKnownCompressedKey(key []byte) (bool, error) {
+	if len(key) != 33 {
+		return false, nil
+	}
+	return r.HasKey(key)
 }

@@ -1,6 +1,6 @@
 module github.com/darwayne/chain-grabber
 
-go 1.21
+go 1.22
 
 require (
 	github.com/btcsuite/btcd v0.24.0

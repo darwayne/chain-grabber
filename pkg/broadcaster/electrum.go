@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/darwayne/errutil"
 	"github.com/muun/recovery/utils"
 	"github.com/pkg/errors"
 	"golang.org/x/net/proxy"
@@ -501,6 +502,10 @@ func (c *ElectrumClient) callRaw(request []byte) ([]byte, error) {
 
 	if !c.IsConnected() {
 		return nil, c.log.Errorf("Send failed %s: not connected", string(request))
+	}
+
+	if c == nil || c.conn == nil {
+		return nil, errutil.Wrap(c.log.Errorf(""), errutil.WithEasyTags("fatal", "error"))
 	}
 
 	request = append(request, messageDelim)

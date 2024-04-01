@@ -122,7 +122,15 @@ func (r *Rest) BroadcastHex(ctx context.Context, str string) error {
 	}
 
 	if result.StatusCode() != 200 {
-		return errors.New(fmt.Sprintf("unexpected status code: %d", result.StatusCode()))
+		var body string
+		rawBody := result.RawBody()
+		defer rawBody.Close()
+		data, err := io.ReadAll(result.RawBody())
+		if err == nil {
+			body = string(data)
+		}
+
+		return errors.New(fmt.Sprintf("unexpected status code: %d\nbody:%s", result.StatusCode(), body))
 	}
 
 	return nil

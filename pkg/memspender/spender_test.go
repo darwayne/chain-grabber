@@ -381,9 +381,7 @@ func testNetwork(t *testing.T, isMainNet bool) {
 	spender, err := memspender.New(m.Subscribe(), !isMainNet, publisher.Broker, addressToUse, l)
 	require.NoError(t, err)
 
-	db, err := sql.Open("sqlite3", "../keygen/testdata/sampledbs/keydbv2.sqlite")
-	require.NoError(t, err)
-	secretStore := keygen.NewSQLReader(db, params)
+	secretStore := getSecretStore(t, params)
 
 	spender.SetSecrets(secretStore)
 	t.Cleanup(func() {
@@ -404,4 +402,26 @@ func testNetwork(t *testing.T, isMainNet bool) {
 	case <-sigutil.Done():
 		return
 	}
+}
+
+func getSecretStore(t *testing.T, params *chaincfg.Params) *keygen.SQLReader {
+	t.Helper()
+	db, err := sql.Open("sqlite3", "../keygen/testdata/sampledbs/keydbv2.sqlite")
+	require.NoError(t, err)
+	secretStore := keygen.NewSQLReader(db, params)
+	t.Cleanup(func() {
+		secretStore.Close()
+	})
+
+	return secretStore
+}
+
+func testNetSecretStore(t *testing.T) *keygen.SQLReader {
+	t.Helper()
+	return getSecretStore(t, &chaincfg.TestNet3Params)
+}
+
+func mainNetSecretStore(t *testing.T) *keygen.SQLReader {
+	t.Helper()
+	return getSecretStore(t, &chaincfg.MainNetParams)
 }

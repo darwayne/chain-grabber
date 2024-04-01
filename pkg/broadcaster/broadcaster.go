@@ -2,6 +2,7 @@ package broadcaster
 
 import (
 	"context"
+	"github.com/darwayne/errutil"
 	"go.uber.org/zap"
 	"sync"
 	"sync/atomic"
@@ -36,9 +37,17 @@ func (b *BroadCaster) Connect(ctx context.Context) {
 	go b.generateClients(ctx, connected)
 	for cli := range connected {
 		server := cli.Server
+		field := zap.String("server", server)
 		go func() {
 			ticker := time.NewTicker(10 * time.Second)
 			sub := broker.Subscribe()
+			defer func() {
+				if r := recover(); r != nil {
+					logger.Warn("recovered from panic", zap.Any("err", r))
+				}
+
+				broker.UnSubscribe(sub)
+			}()
 			for {
 				select {
 				case <-ctx.Done():
@@ -46,14 +55,18 @@ func (b *BroadCaster) Connect(ctx context.Context) {
 				case msg := <-sub:
 					res, err := cli.Broadcast(*msg)
 					if err != nil {
-						logger.Warn("error broadcasting to node", zap.Error(err), zap.String("server", server))
+						logger.Warn("error broadcasting to node", zap.Error(err), field)
 					} else {
 						logger.Info("successfully broadcasted", zap.String("txid", res),
-							zap.String("server", server))
+							field)
 					}
 				case <-ticker.C:
 					_, err := cli.Ping()
 					if err != nil {
+						if len(errutil.GetTags(err)) > 0 {
+							logger.Warn("exiting client loop early")
+							return
+						}
 						logger.Warn("error pinging reconnecting", zap.String("server", server))
 						cli.Reconnect()
 					} else {

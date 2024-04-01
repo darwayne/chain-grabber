@@ -264,7 +264,7 @@ func SignTx(tx *wire.MsgTx, prevPkScripts [][]byte,
 		var witnesses [][]byte
 
 		fmt.Println("first pass\n=-=-=-=-")
-		yo := txscript.MakeScriptTokenizer(0, copyBytes(script))
+		yo := txscript.MakeScriptTokenizer(0, script)
 		builder := txscript.NewScriptBuilder()
 	loop:
 		for yo.Next() {
@@ -284,16 +284,12 @@ func SignTx(tx *wire.MsgTx, prevPkScripts [][]byte,
 				if info.UseWitness {
 					if opCode == 0 {
 						witnesses = append(witnesses, []byte{})
-						continue
+						continue loop
 					}
 					witnesses = append(witnesses, []byte{opCode})
 				}
 
 				builder.AddOp(opCode)
-			}
-
-			if yo.Done() {
-				break loop
 			}
 		}
 		if err := yo.Err(); err != nil {
@@ -301,11 +297,11 @@ func SignTx(tx *wire.MsgTx, prevPkScripts [][]byte,
 			return err
 		}
 		if info.UseWitness {
-			witnesses = append(witnesses, copyBytes(sigScript))
+			witnesses = append(witnesses, sigScript)
 			inputs[i].Witness = witnesses
 			inputs[i].SignatureScript = nil
 		} else {
-			builder.AddData(copyBytes(sigScript))
+			builder.AddData(sigScript)
 			script, err = builder.Script()
 			if err != nil {
 				return err
@@ -315,7 +311,7 @@ func SignTx(tx *wire.MsgTx, prevPkScripts [][]byte,
 			inputs[i].SignatureScript = script
 
 			fmt.Println("final script is:\n-0-0-0-0-0")
-			yo = txscript.MakeScriptTokenizer(0, copyBytes(script))
+			yo = txscript.MakeScriptTokenizer(0, script)
 			for yo.Next() {
 				fmt.Println("op code is", mappedOpCodes[yo.Opcode()])
 				fmt.Printf("data is: %x\n", yo.Data())

@@ -2,11 +2,9 @@ package broadcaster
 
 import (
 	"context"
-	"github.com/darwayne/errutil"
 	"go.uber.org/zap"
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
 type BroadCaster struct {
@@ -36,10 +34,10 @@ func (b *BroadCaster) Connect(ctx context.Context) {
 	connected := make(chan *ElectrumClient, 1)
 	go b.generateClients(ctx, connected)
 	for cli := range connected {
+		cli.Disconnect()
 		server := cli.Server
 		field := zap.String("server", server)
 		go func() {
-			ticker := time.NewTicker(10 * time.Second)
 			sub := broker.Subscribe()
 			defer func() {
 				if r := recover(); r != nil {
@@ -53,6 +51,10 @@ func (b *BroadCaster) Connect(ctx context.Context) {
 				case <-ctx.Done():
 					return
 				case msg := <-sub:
+					if err := cli.Connect(server); err != nil {
+						logger.Warn("error connecting to node", zap.Error(err), field)
+						continue
+					}
 					res, err := cli.Broadcast(*msg)
 					if err != nil {
 						logger.Warn("error broadcasting to node", zap.Error(err), field)
@@ -60,19 +62,7 @@ func (b *BroadCaster) Connect(ctx context.Context) {
 						logger.Info("successfully broadcasted", zap.String("txid", res),
 							field)
 					}
-				case <-ticker.C:
-					_, err := cli.Ping()
-					if err != nil {
-						if len(errutil.GetTags(err)) > 0 {
-							logger.Warn("exiting client loop early")
-							return
-						}
-						logger.Warn("error pinging reconnecting", zap.String("server", server))
-						cli.Reconnect()
-					} else {
-						//logger.Info("ping success", zap.String("server", server))
-					}
-
+					cli.Disconnect()
 				}
 			}
 		}()
@@ -122,11 +112,12 @@ func (b *BroadCaster) generateClients(ctx context.Context, channel chan *Electru
 		}
 
 		val := atomic.AddInt64(&connected, 1)
+		_ = val
 
-		b.logger.Info("electrum client connected",
-			zap.String("server", server),
-			zap.Int64("connected", val),
-		)
+		//b.logger.Info("electrum client connected",
+		//	zap.String("server", server),
+		//	zap.Int64("connected", val),
+		//)
 
 		select {
 		case channel <- cli:

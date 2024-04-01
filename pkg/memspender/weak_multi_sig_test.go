@@ -36,11 +36,11 @@ func TestMultiSigAddressGen(t *testing.T) {
 	}
 
 	gen := addressgen.NewTestNet()
-	addr, err := gen.MultiSigScriptHash(2, 3, pubKeys...)
+	addr, err := gen.MultiSigScriptHash(0, 3, pubKeys...)
 	require.NoError(t, err)
 	t.Log("script address", addr.EncodeAddress())
 
-	addr, err = gen.MultiSigWitnessHash(2, 3, pubKeys...)
+	addr, err = gen.MultiSigWitnessHash(0, 3, pubKeys...)
 	require.NoError(t, err)
 	t.Log("witness address", addr.EncodeAddress())
 }

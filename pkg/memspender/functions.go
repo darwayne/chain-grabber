@@ -328,3 +328,7 @@ func copyBytes(data []byte) []byte {
 	result = append(result, data...)
 	return result
 }
+
+func witnessSigner(tx *wire.MsgTx, index int) {
+
+}

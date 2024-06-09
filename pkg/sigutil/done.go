@@ -5,7 +5,13 @@ import (
 	"os/signal"
 )
 
+var doneChan = getDone()
+
 func Done() <-chan struct{} {
+	return doneChan
+}
+
+func getDone() <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		c := make(chan os.Signal, 1)

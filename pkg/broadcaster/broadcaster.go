@@ -59,8 +59,8 @@ func (b *BroadCaster) Connect(ctx context.Context) {
 					if err != nil {
 						logger.Warn("error broadcasting to node", zap.Error(err), field)
 					} else {
-						logger.Info("successfully broadcasted", zap.String("txid", res),
-							field)
+						_ = res
+						//logger.Info("successfully broadcasted", zap.String("txid", res), field)
 					}
 					cli.Disconnect()
 				}

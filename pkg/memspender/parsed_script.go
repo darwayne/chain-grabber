@@ -44,7 +44,7 @@ func (p ParsedScript) IsP2PKH() bool {
 		return false
 	}
 
-	return p.Data[0][0] == 48 && len(p.Data[1]) == 33
+	return p.Data[0][0] == 48 && len(p.Data[1]) == 33 && !p.IsMultiSig()
 }
 
 func (p ParsedScript) IsP2WPKH() bool {
@@ -53,11 +53,11 @@ func (p ParsedScript) IsP2WPKH() bool {
 		return false
 	}
 
-	return p.Data[0][0] == 48 && len(p.Data[1]) == 33
+	return p.Data[0][0] == 48 && len(p.Data[1]) == 33 && !p.IsMultiSig()
 }
 
 func (p ParsedScript) AssumePKScript() ([]byte, error) {
-	if p.IsSegwitMultiSig() {
+	if p.IsMultiSig() {
 		keys, minKeys, err := p.MultiSigKeysRaw()
 		if err != nil {
 			return nil, err
@@ -101,13 +101,27 @@ func (p ParsedScript) AssumePKScript() ([]byte, error) {
 	return nil, nil
 }
 
-func (p ParsedScript) IsSegwitMultiSig() bool {
-	totalOps := len(p.Ops)
-	if totalOps < 4 || p.IsPushOnly {
+func (p ParsedScript) extractLastScript() []byte {
+	lastData := p.Data[len(p.Data)-1]
+	dataLen := len(lastData)
+	if dataLen == 0 {
+		return nil
+	}
+
+	return lastData
+}
+
+func (p ParsedScript) IsMultiSig() bool {
+	if !p.IsPushOnly || len(p.Ops) < 2 {
 		return false
 	}
 
-	return p.Ops[totalOps-1] == txscript.OP_CHECKMULTISIG
+	lastData := p.extractLastScript()
+	if lastData == nil {
+		return false
+	}
+
+	return lastData[len(lastData)-1] == txscript.OP_CHECKMULTISIG
 }
 
 func (p ParsedScript) IsTaproot() bool {
@@ -120,24 +134,25 @@ func (p ParsedScript) IsTaproot() bool {
 }
 
 func (p ParsedScript) MultiSigKeys() ([]*btcec.PublicKey, int, error) {
-	if !p.IsSegwitMultiSig() {
+	if !p.IsMultiSig() {
 		return nil, 0, nil
 	}
-
-	totalKeys := int(p.Ops[len(p.Ops)-2] - 0x50)
-	if len(p.Ops) <= (totalKeys + 3) {
+	n := NewParsedScript(p.extractLastScript())
+	if len(n.Ops) < 4 {
 		return nil, 0, nil
 	}
-
-	minKeys := int(p.Ops[len(p.Ops)-3-totalKeys] - 0x50)
+	totalKeys := int(n.Ops[len(n.Ops)-2] - 0x50)
+	if len(n.Ops) < totalKeys {
+		return nil, 0, nil
+	}
+	minKeys := int(n.Ops[0] - 0x50)
 
 	var keys []*btcec.PublicKey
-	for i := len(p.Ops) - 2 - totalKeys; i < len(p.Ops)-2; i++ {
-		key, err := btcec.ParsePubKey(p.Data[i])
+	for i := 1; i < len(n.Ops)-2; i++ {
+		key, err := btcec.ParsePubKey(n.Data[i])
 		if err != nil {
 			return nil, 0, err
 		}
-
 		keys = append(keys, key)
 	}
 
@@ -145,19 +160,23 @@ func (p ParsedScript) MultiSigKeys() ([]*btcec.PublicKey, int, error) {
 }
 
 func (p ParsedScript) MultiSigKeysRaw() ([][]byte, int, error) {
-	if !p.IsSegwitMultiSig() {
+	if !p.IsMultiSig() {
 		return nil, 0, nil
 	}
 
-	totalKeys := int(p.Ops[len(p.Ops)-2] - 0x50)
-	if len(p.Ops) <= (totalKeys + 3) {
+	n := NewParsedScript(p.extractLastScript())
+	if len(n.Ops) < 4 {
 		return nil, 0, nil
 	}
-	minKeys := int(p.Ops[len(p.Ops)-3-totalKeys] - 0x50)
+	totalKeys := int(n.Ops[len(n.Ops)-2] - 0x50)
+	if len(n.Ops) < totalKeys {
+		return nil, 0, nil
+	}
+	minKeys := int(n.Ops[0] - 0x50)
 
 	var keys [][]byte
-	for i := len(p.Ops) - 2 - totalKeys; i < len(p.Ops)-2; i++ {
-		keys = append(keys, p.Data[i])
+	for i := 1; i < len(n.Ops)-2; i++ {
+		keys = append(keys, n.Data[i])
 	}
 
 	return keys, minKeys, nil

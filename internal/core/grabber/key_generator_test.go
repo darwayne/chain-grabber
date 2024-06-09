@@ -2,6 +2,7 @@ package grabber
 
 import (
 	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/darwayne/chain-grabber/pkg/sigutil"
 	"github.com/stretchr/testify/require"
 	"testing"
 	"time"
@@ -23,4 +24,12 @@ func BenchmarkGenerateKeys(b *testing.B) {
 	//for i := 0; i < b.N; i++ {
 	//	GenerateKeys(0, 100, &chaincfg.TestNet3Params)
 	//}
+}
+
+func TestStreamKeysOnlyOrdered(t *testing.T) {
+	for info := range StreamKeysOnlyOrdered(1, 1000) {
+		t.Log(info.Num)
+	}
+
+	sigutil.Wait()
 }

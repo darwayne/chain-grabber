@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/stretchr/testify/require"
@@ -110,4 +111,12 @@ func TestDecodeTransaction(t *testing.T) {
 	var tx wire.MsgTx
 	err := tx.Deserialize(raw)
 	require.NoError(t, err)
+}
+
+func TestGetFees(t *testing.T) {
+	//t.Setenv("PROXY_USER", "")
+	net := NewRest(WithNetwork(&chaincfg.MainNetParams))
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	t.Cleanup(cancel)
+	t.Log(net.GetFee(ctx))
 }

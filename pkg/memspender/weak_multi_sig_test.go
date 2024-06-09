@@ -17,9 +17,9 @@ import (
 )
 
 func TestMultiSigAddressGen(t *testing.T) {
-	key1 := keygen.FromInt(1)
-	key2 := keygen.FromInt(2)
-	key3 := keygen.FromInt(3)
+	key1 := keygen.FromInt(912)
+	key2 := keygen.FromInt(200000)
+	key3 := keygen.FromInt(300123)
 	require.NotNil(t, key1)
 	require.NotNil(t, key2)
 	require.NotNil(t, key3)
@@ -27,11 +27,11 @@ func TestMultiSigAddressGen(t *testing.T) {
 	store := testNetSecretStore(t)
 
 	var pubKeys [][]byte
-	for _, key := range []*btcec.PrivateKey{key1, key2, key3} {
+	for idx, key := range []*btcec.PrivateKey{key1, key2, key3} {
 		compressed := key.PubKey().SerializeCompressed()
 		known, err := store.HasKnownCompressedKey(compressed)
 		require.NoError(t, err)
-		require.True(t, known)
+		require.True(t, known, idx)
 		pubKeys = append(pubKeys, compressed)
 	}
 
@@ -40,15 +40,15 @@ func TestMultiSigAddressGen(t *testing.T) {
 	require.NoError(t, err)
 	t.Log("script address", addr.EncodeAddress())
 
-	addr, err = gen.MultiSigWitnessHash(0, 3, pubKeys...)
+	addr, err = gen.MultiSigWitnessHash(2, 3, pubKeys...)
 	require.NoError(t, err)
 	t.Log("witness address", addr.EncodeAddress())
 }
 
 func TestSpendMultiSig(t *testing.T) {
-	spendFromTx := testhelpers.TxFromHex(t, "020000000001015982b2497751836ac805fe96d1208a8e505f7aca66567bf7bd64de3263ebaa1f0100000000fdffffff02f03600000000000022002012c2ffbc6ec1cf5d746dfbd49b1063356212ea55f43023ffc0145934af20c5727981000000000000160014e3a265503db8c15654ab51a6bec12461330b735002473044022010140b5f75e21d055bedcf53dab534b28f60a7e211772806bbb58bd5b59df85802202b314ff25668604f102d8ed64e3a6187407ffaf852727c2fbe053e3f9dada90e0121021eae0b45956be67b0a728b11bdc5e9cc3c6896effc0a77b66e840413b76022bc78702700")
+	spendFromTx := testhelpers.TxFromHex(t, "020000000001010b7fe20f16998ffb02ee9a1d2cc3c4efc7c4274d7b6d18cbeea79fd73e18ac0c0100000000fdffffff02f29000000000000017a91415fc0754e73eb85d1cbce08786fadb7320ecb8dc8754c23402000000001600141ce4c1a202ebbfe1a2c64c853ce99f2af49085020247304402205b26ce13f4e07075fa0661ac27c05308198bdf37eb19fbc60908485c9aa3d91c022028c2288772359f1cfd9a125658f5083ad4134284e1cbae60f122e37ef37d0b850121020419122b06beadf57dfafce754111ed9bc7334b82d127c78e5968c694611c79004732700")
 
-	addr, err := btcutil.DecodeAddress("mijXqYcsZnU6RqfaYML4ajvkKngJTuc6xV", &chaincfg.TestNet3Params)
+	addr, err := btcutil.DecodeAddress("2MuFU6ZyBLtDNadMA6RnwJdXGWUSUaoKLeS", &chaincfg.TestNet3Params)
 	require.NoError(t, err)
 	signer := testNetSecretStore(t)
 
@@ -74,7 +74,7 @@ func TestSpendMultiSig(t *testing.T) {
 	script, err := gen.MultiSigScript(2, 3, pubKeys...)
 	require.NoError(t, err)
 
-	tx := memspender.SpendMultiSigTx(spendFromTx, addr, 5, signer, [][]byte{script}, 0)
+	tx := memspender.SpendMultiSigTx(spendFromTx, addr, 2, signer, [][]byte{script}, 0)
 	require.NotNil(t, tx)
 
 	var originalValue int64
@@ -111,6 +111,68 @@ func TestSpendMultiSig(t *testing.T) {
 	err = mempoolspace.NewRest(mempoolspace.WithNetwork(&chaincfg.TestNet3Params)).WithDebugging().WithTrace().
 		BroadcastHex(context.Background(), encoded)
 	require.NoError(t, err)
+
+}
+
+func TestSpendMultiSigRaw(t *testing.T) {
+	spendFromTx := testhelpers.TxFromHex(t, "0200000000010118ea78e35577b5d30642798cd7d53e63b3105a590709fc0dc7dd911172d2976f0100000000fdffffff022d9000000000000017a91415fc0754e73eb85d1cbce08786fadb7320ecb8dc8799313402000000001600146a56bc7b145bcf60be59d3bf016d5e3c6d29e98902473044022020aa82ee0a569b49dee602770fd0679a7906d36aec33682d8abec29457e999d30220611d8d770d4d571ee23f373a6d0b1fb1000c6fc7911e239da3f14f1484f91eb10121039bb1ad47054d2d2989a40a68e3f51f54880461d33904e14ff8820b0695d9dcd707732700")
+
+	addr, err := btcutil.DecodeAddress("2MuFU6ZyBLtDNadMA6RnwJdXGWUSUaoKLeS", &chaincfg.TestNet3Params)
+	require.NoError(t, err)
+	signer := testNetSecretStore(t)
+
+	key1 := keygen.FromInt(1)
+	key2 := keygen.FromInt(2)
+	key3 := keygen.FromInt(3)
+	require.NotNil(t, key1)
+	require.NotNil(t, key2)
+	require.NotNil(t, key3)
+
+	store := testNetSecretStore(t)
+
+	var pubKeys [][]byte
+	for _, key := range []*btcec.PrivateKey{key1, key2, key3} {
+		compressed := key.PubKey().SerializeCompressed()
+		known, err := store.HasKnownCompressedKey(compressed)
+		require.NoError(t, err)
+		require.True(t, known)
+		pubKeys = append(pubKeys, compressed)
+	}
+
+	gen := addressgen.NewTestNet()
+	script, err := gen.MultiSigScript(2, 3, pubKeys...)
+	require.NoError(t, err)
+
+	tx := memspender.SpendMultiSigTx(spendFromTx, addr, 10, signer, [][]byte{script}, 0)
+	require.NotNil(t, tx)
+
+	var originalValue int64
+	var sentValue int64
+
+	for idx, out := range spendFromTx.TxOut {
+		_ = idx
+		originalValue += out.Value
+	}
+
+	for _, out := range tx.TxOut {
+		sentValue += out.Value
+	}
+
+	t.Log("prev outpoint is", tx.TxIn[0].PreviousOutPoint)
+
+	t.Log(txscript.DisasmString(tx.TxIn[0].SignatureScript))
+
+	t.Log("original value", btcutil.Amount(originalValue))
+	t.Log("sent value", btcutil.Amount(sentValue))
+
+	/*
+		err:
+		unexpected status code: 400
+		        	            	body:sendrawtransaction RPC error: {"code":-26,"message":"mandatory-script-verify-flag-failed (Non-canonical DER signature)"}
+	*/
+
+	encoded := txhelper.ToString(tx)
+	t.Log("encoded tx is", encoded)
 
 }
 

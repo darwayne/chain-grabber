@@ -8,6 +8,7 @@ import (
 	"github.com/darwayne/chain-grabber/pkg/sigutil"
 	"math"
 	"runtime"
+	"sort"
 	"sync"
 )
 
@@ -26,6 +27,184 @@ type KeyStream struct {
 	Key       *btcec.PrivateKey
 	Addresses []Addr
 	Err       error
+}
+
+type KeysOnlyStream struct {
+	Num int
+	Key *btcec.PrivateKey
+	Err error
+}
+
+func StreamKeysOnlyOrdered(start, end int) <-chan KeysOnlyStream {
+	maxCores := runtime.GOMAXPROCS(0)
+	completedWork := make(chan KeysOnlyStream, maxCores)
+
+	go func() {
+		defer close(completedWork)
+		done := sigutil.Done()
+
+		sendWork := func(work KeysOnlyStream) bool {
+			select {
+			case completedWork <- work:
+			case <-done:
+				return true
+			}
+
+			return false
+		}
+
+		doneChan := make(chan struct{})
+		workChan := make(chan uint32)
+		var wg sync.WaitGroup
+		var mu sync.RWMutex
+		var keysToSend []KeysOnlyStream
+
+		for i := 0; i < maxCores; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					select {
+					case num := <-workChan:
+						var mod btcec.ModNScalar
+						mod.Zero()
+						mod.SetInt(num)
+						key := btcec.PrivKeyFromScalar(&mod)
+
+						mu.Lock()
+						keysToSend = append(keysToSend, KeysOnlyStream{
+							Key: key,
+							Num: int(num),
+						})
+						mu.Unlock()
+
+					case <-done:
+						return
+					case <-doneChan:
+						return
+					}
+				}
+			}()
+		}
+
+		var lastSent *int
+
+		send := func() {
+			mu.Lock()
+			sort.Slice(keysToSend, func(i, j int) bool {
+				return keysToSend[i].Num < keysToSend[j].Num
+			})
+			data := append(
+				make([]KeysOnlyStream, 0, len(keysToSend)),
+				keysToSend...)
+			mu.Unlock()
+
+			var sent int
+			if lastSent == nil {
+				for idx, info := range data {
+					info := info
+					if idx == 0 && info.Num != start {
+						break
+					}
+
+					if lastSent != nil && *lastSent != (info.Num-1) {
+						break
+					}
+
+					sent++
+					lastSent = &info.Num
+					sendWork(info)
+				}
+			} else {
+				for _, info := range data {
+					info := info
+
+					if lastSent != nil && *lastSent != (info.Num-1) {
+						break
+					}
+
+					sent++
+					lastSent = &info.Num
+					sendWork(info)
+				}
+			}
+
+			mu.Lock()
+			keysToSend = keysToSend[sent:]
+			mu.Unlock()
+		}
+
+		var iterations int
+		for i := start; i <= end; i++ {
+			select {
+			case workChan <- uint32(i):
+			case <-done:
+				close(doneChan)
+				return
+			}
+			iterations++
+			if iterations%50 == 0 {
+				send()
+			}
+		}
+
+		close(doneChan)
+		wg.Wait()
+
+		send()
+	}()
+
+	return completedWork
+}
+
+func StreamKeysOnly(start, end int) <-chan KeysOnlyStream {
+	maxCores := runtime.GOMAXPROCS(0)
+	r := Range{start, end}
+	pieces := r.Split(maxCores)
+	completedWork := make(chan KeysOnlyStream, maxCores)
+	sem := make(chan struct{}, maxCores)
+	var wg sync.WaitGroup
+
+	done := sigutil.Done()
+
+	sendWork := func(work KeysOnlyStream) bool {
+		select {
+		case completedWork <- work:
+		case <-done:
+			return true
+		}
+
+		return false
+	}
+
+	for _, p := range pieces {
+		wg.Add(1)
+		go func(rang Range) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() {
+				<-sem
+			}()
+			for i := rang[1]; i >= rang[0] && i <= rang[1]; i-- {
+				var mod btcec.ModNScalar
+				mod.Zero()
+				mod.SetInt(uint32(i))
+				key := btcec.PrivKeyFromScalar(&mod)
+
+				sendWork(KeysOnlyStream{
+					Key: key,
+					Num: i,
+				})
+			}
+		}(p)
+	}
+
+	go func() {
+		wg.Wait()
+		close(completedWork)
+	}()
+
+	return completedWork
 }
 
 func StreamKeys(start, end int) <-chan KeyStream {

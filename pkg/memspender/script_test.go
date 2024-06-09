@@ -3,6 +3,7 @@ package memspender
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -14,6 +15,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/darwayne/chain-grabber/internal/core/blockchain/mempoolspace"
 	"github.com/darwayne/chain-grabber/internal/test/testhelpers"
+	"github.com/darwayne/chain-grabber/pkg/keygen"
 	"github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -223,11 +225,16 @@ func TestClassify(t *testing.T) {
 		txCache: expirable.NewLRU[chainhash.Hash, TxInfo](5_000, nil, 5*time.Minute),
 	}
 	yo.cli = mempoolspace.NewRest(mempoolspace.WithNetwork(yo.cfg))
+	yo.SetSecrets(getSecretStore(t, yo.cfg))
 
 	tests := []struct {
 		hex    string
 		expect TxClassification
 	}{
+		{
+			hex:    "0100000001258b2b1e044531853830fcc05192dd5bb68182bbaf40f2321f9a627e9d39201400000000fdfd0000473044022005ebbcc65925e252360b8af0c0c58f755bf713e78bd3acbbbf3e4912b4d7e94702204cb37711de8c254368413d419854e46f24796a8b90c2a7f43079e5e842db23ee01483045022100de03ab245f9e54f2f859b7514469b36b99e4469362bf361ee31d22ac30962fcc022063e8b477ccdb68f0bc5a1a08b976fe0e83307f80964b602de2bda6d2b54b8d6b014c6952210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817982102c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee52102f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f953aefdffffff01692f0000000000001976a91423495e8094db91768be877bfb0cf78cf0ab2e30488ac00000000",
+			expect: SpentKnownMultiSig,
+		},
 		{
 			hex:    "01000000000101b7c967844d243b24c03e3068cc0cf105febaa67c4f7dff25b93c7250bc1910530100000000fdffffff014f4d0000000000001600140608b7548258c4f00da6265263a848d2c233cc4001015100000000",
 			expect: ReplayableSimpleInput,
@@ -268,7 +275,7 @@ func TestClassify(t *testing.T) {
 			t.Log("txid", tx.TxHash().String())
 			result := yo.classifyTx(tx)
 
-			require.Equal(t, tt.expect, result)
+			require.Equal(t, tt.expect.String(), result.String())
 		})
 	}
 
@@ -403,4 +410,16 @@ func TestFee(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, val)
 	t.Logf("%+v", *val)
+}
+
+func getSecretStore(t *testing.T, params *chaincfg.Params) *keygen.SQLReader {
+	t.Helper()
+	db, err := sql.Open("sqlite3", "../keygen/testdata/sampledbs/keydbv2.sqlite")
+	require.NoError(t, err)
+	secretStore := keygen.NewSQLReader(db, params)
+	t.Cleanup(func() {
+		secretStore.Close()
+	})
+
+	return secretStore
 }

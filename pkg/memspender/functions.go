@@ -2,7 +2,6 @@ package memspender
 
 import (
 	"context"
-	"fmt"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -40,7 +39,7 @@ func SpendKnownKey(ctx context.Context, tx *wire.MsgTx, dstScript []byte, fetche
 		originalInputValue += outpoint.Value
 
 		parsed := NewParsedScript(in.SignatureScript, in.Witness...)
-		if !(parsed.IsP2PKH() || parsed.IsP2WPKH() || parsed.IsSegwitMultiSig()) {
+		if !(parsed.IsP2PKH() || parsed.IsP2WPKH() || parsed.IsMultiSig()) {
 			continue
 		}
 		key, _ := parsed.PublicKeyRaw()
@@ -263,7 +262,6 @@ func SignTx(tx *wire.MsgTx, prevPkScripts [][]byte,
 
 		var witnesses [][]byte
 
-		fmt.Println("first pass\n=-=-=-=-")
 		yo := txscript.MakeScriptTokenizer(0, script)
 		builder := txscript.NewScriptBuilder()
 	loop:
@@ -272,13 +270,10 @@ func SignTx(tx *wire.MsgTx, prevPkScripts [][]byte,
 			data := copyBytes(yo.Data())
 			opCode := yo.Opcode()
 
-			fmt.Println("op code is", mappedOpCodes[opCode])
-
 			if len(data) > 0 {
 				if info.UseWitness {
 					witnesses = append(witnesses, copyBytes(data))
 				}
-				fmt.Printf("data is: %x\n", data)
 				builder.AddData(copyBytes(data))
 			} else {
 				if info.UseWitness {
@@ -293,7 +288,6 @@ func SignTx(tx *wire.MsgTx, prevPkScripts [][]byte,
 			}
 		}
 		if err := yo.Err(); err != nil {
-			fmt.Println("error", yo.Err().Error())
 			return err
 		}
 		if info.UseWitness {
@@ -307,15 +301,7 @@ func SignTx(tx *wire.MsgTx, prevPkScripts [][]byte,
 				return err
 			}
 
-			fmt.Printf("script sig is: %x\n", script)
 			inputs[i].SignatureScript = script
-
-			fmt.Println("final script is:\n-0-0-0-0-0")
-			yo = txscript.MakeScriptTokenizer(0, script)
-			for yo.Next() {
-				fmt.Println("op code is", mappedOpCodes[yo.Opcode()])
-				fmt.Printf("data is: %x\n", yo.Data())
-			}
 		}
 
 	}
@@ -329,6 +315,34 @@ func copyBytes(data []byte) []byte {
 	return result
 }
 
-func witnessSigner(tx *wire.MsgTx, index int) {
+func witnessSigner(tx *wire.MsgTx, prevPkScripts [][]byte,
+	inputValues []btcutil.Amount, secrets txauthor.SecretsSource) error {
+	_ = txscript.WitnessSignature
 
+	//inputFetcher, err := txauthor.TXPrevOutFetcher(tx, prevPkScripts, inputValues)
+	//if err != nil {
+	//	return err
+	//}
+	//
+	//hashCache := txscript.NewTxSigHashes(tx, inputFetcher)
+	//chainParams := secrets.ChainParams()
+	//
+	//for idx, in := range tx.TxIn {
+	//	if !txscript.IsMultisigSigScript(in.SignatureScript) {
+	//		errors.New("non multisig script detected")
+	//	}
+	//	_, addrs, _, err := txscript.ExtractPkScriptAddrs(prevPkScripts[idx],
+	//		chainParams)
+	//	if err != nil {
+	//		return err
+	//	}
+	//
+	//	if len(addrs) != 1 || !txscript.IsPayToWitnessScriptHash(addrs[0].ScriptAddress()) {
+	//		continue
+	//	}
+	//
+	//	txscript.WitnessSignature(tx, hashCache, idx, inputValues[idx], )
+	//}
+	//
+	return nil
 }

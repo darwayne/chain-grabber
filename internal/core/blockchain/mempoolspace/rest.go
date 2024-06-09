@@ -37,7 +37,7 @@ func NewRest(opts ...RestOptsFunc) *Rest {
 		cli = resty.NewWithClient(options.HttpClient)
 	} else if os.Getenv("PROXY_USER") != "" {
 
-		d, err := proxy.SOCKS5("tcp", "atl.socks.ipvanish.com:1080", &proxy.Auth{
+		d, err := proxy.SOCKS5("tcp", "phx.socks.ipvanish.com:1080", &proxy.Auth{
 			User:     os.Getenv("PROXY_USER"),
 			Password: os.Getenv("PROXY_PASS"),
 		}, proxy.Direct)
@@ -92,7 +92,8 @@ func NewRest(opts ...RestOptsFunc) *Rest {
 			}
 		}
 	}()
-	cli.OnBeforeRequest(func(_ *resty.Client, _ *resty.Request) error {
+	cli.OnBeforeRequest(func(_ *resty.Client, r *resty.Request) error {
+		r.SetHeader("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
 		waitForWork <- struct{}{}
 		return nil
 	})

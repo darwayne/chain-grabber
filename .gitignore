@@ -5,3 +5,5 @@ storedblocks
 passwords.go
 build/
 sampledbs/
+cert.crt
+cert.key

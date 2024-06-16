@@ -10,7 +10,7 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
-	"github.com/darwayne/chain-grabber/internal/core/blockchain/mempoolspace"
+	"github.com/darwayne/chain-grabber/internal/core/blockchain/blockchainmodels"
 	"github.com/darwayne/chain-grabber/pkg/broadcaster"
 	"github.com/darwayne/chain-grabber/pkg/txhelper"
 	"github.com/hashicorp/golang-lru/v2/expirable"
@@ -38,7 +38,7 @@ type Spender struct {
 	publisher       *broadcaster.Broker[*string]
 	cfg             *chaincfg.Params
 	logger          *zap.Logger
-	cli             *mempoolspace.Rest
+	cli             NetworkGrabber
 	txCache         *expirable.LRU[chainhash.Hash, TxInfo]
 	enableReplay    bool
 
@@ -48,7 +48,7 @@ type Spender struct {
 	seenTransactions []*wire.MsgTx
 
 	feeMu sync.RWMutex
-	fee   mempoolspace.Fee
+	fee   blockchainmodels.Fee
 }
 
 type TxInfo struct {
@@ -57,7 +57,15 @@ type TxInfo struct {
 	IsBad  bool
 }
 
-func New(channel chan *wire.MsgTx, isTestNet bool, publisher *broadcaster.Broker[*string], address string, logger *zap.Logger) (*Spender, error) {
+type NetworkGrabber interface {
+	GetAddressUTXOs(ctx context.Context, address string) ([]blockchainmodels.UTXO, error)
+	GetFee(ctx context.Context) (*blockchainmodels.Fee, error)
+	GetTransaction(ctx context.Context, hash chainhash.Hash) (*wire.MsgTx, error)
+	GetUTXO(ctx context.Context, outpoint wire.OutPoint) (*blockchainmodels.UTXO, error)
+}
+
+func New(channel chan *wire.MsgTx, isTestNet bool, publisher *broadcaster.Broker[*string], address string, logger *zap.Logger,
+	cli NetworkGrabber) (*Spender, error) {
 	params := &chaincfg.MainNetParams
 	if isTestNet {
 		params = &chaincfg.TestNet3Params
@@ -80,7 +88,7 @@ func New(channel chan *wire.MsgTx, isTestNet bool, publisher *broadcaster.Broker
 		publisher:       publisher,
 		cfg:             params,
 		logger:          logger,
-		cli:             mempoolspace.NewRest(mempoolspace.WithNetwork(params)),
+		cli:             cli,
 	}, nil
 }
 

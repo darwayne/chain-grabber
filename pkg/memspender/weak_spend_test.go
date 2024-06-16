@@ -7,6 +7,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/darwayne/chain-grabber/internal/core/blockchain/lightnode"
+	"github.com/darwayne/chain-grabber/internal/core/blockchain/mempoolspace"
 	"github.com/darwayne/chain-grabber/internal/core/grabber"
 	"github.com/darwayne/chain-grabber/internal/test/testhelpers"
 	"github.com/darwayne/chain-grabber/pkg/broadcaster"
@@ -72,7 +73,9 @@ func TestSegwitWeakKey(t *testing.T) {
 	data := pub.Subscribe()
 	go pub.Start()
 
-	spender, err := New(m.Subscribe(), true, pub, addressToUse, l)
+	cli := mempoolspace.NewRest(mempoolspace.WithNetwork(&chaincfg.TestNet3Params))
+
+	spender, err := New(m.Subscribe(), true, pub, addressToUse, l, cli)
 	require.NoError(t, err)
 
 	secretStore, err := keygen.NewReaderFromDir("./testdata/sampledbs", true)

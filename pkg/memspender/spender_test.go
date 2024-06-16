@@ -14,6 +14,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/darwayne/chain-grabber/internal/core/blockchain/lightnode"
 	"github.com/darwayne/chain-grabber/internal/core/blockchain/mempoolspace"
+	"github.com/darwayne/chain-grabber/internal/core/blockchain/noderpc"
 	"github.com/darwayne/chain-grabber/internal/test/testhelpers"
 	"github.com/darwayne/chain-grabber/pkg/broadcaster"
 	"github.com/darwayne/chain-grabber/pkg/keygen"
@@ -365,20 +366,29 @@ func testNetwork(t *testing.T, isMainNet bool) {
 
 	ctx := context.Background()
 
+	var cli memspender.NetworkGrabber
+
 	l, err := zap.NewDevelopment()
 	require.NoError(t, err)
 	var n *lightnode.Node
 	if isMainNet {
 		n, err = lightnode.NewMainNet(l)
+		if err == nil {
+			rpcUser := os.Getenv("RPC_USER")
+			rpcPass := os.Getenv("RPC_PASS")
+			rpcHost := os.Getenv("RPC_HOST")
+			cli, err = noderpc.NewClient(rpcHost, rpcUser, rpcPass)
+		}
 	} else {
 		n, err = lightnode.NewTestNet(l)
+		cli = mempoolspace.NewRest(mempoolspace.WithNetwork(params))
 	}
 
 	require.NoError(t, err)
 
 	publisher := broadcaster.New(!isMainNet, l)
 
-	spender, err := memspender.New(m.Subscribe(), !isMainNet, publisher.Broker, addressToUse, l)
+	spender, err := memspender.New(m.Subscribe(), !isMainNet, publisher.Broker, addressToUse, l, cli)
 	require.NoError(t, err)
 
 	secretStore := getSecretStore(t, params)

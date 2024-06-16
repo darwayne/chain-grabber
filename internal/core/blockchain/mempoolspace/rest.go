@@ -9,6 +9,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/darwayne/chain-grabber/internal/core/blockchain/blockchainmodels"
 	"github.com/go-resty/resty/v2"
 	"github.com/pkg/errors"
 	"golang.org/x/net/proxy"
@@ -311,20 +312,34 @@ func (r *Rest) GetAddressTransactions(ctx context.Context, address string, after
 	return result, nil
 }
 
-type UTXO struct {
-	Txid   chainhash.Hash `json:"txid"`
-	Index  uint32         `json:"vout"`
-	Status struct {
-		Confirmed   bool   `json:"confirmed"`
-		BlockHeight int    `json:"block_height"`
-		BlockHash   string `json:"block_hash"`
-		BlockTime   int    `json:"block_time"`
-	} `json:"status"`
-	Value int64 `json:"value"`
+func (r *Rest) GetUTXO(ctx context.Context, outpoint wire.OutPoint) (*blockchainmodels.UTXO, error) {
+	results, err := r.TransactionOutSpends(ctx, outpoint.Hash)
+	if err != nil {
+		return nil, err
+	}
+
+	var result *blockchainmodels.UTXO = nil
+
+	for _, rr := range results {
+		if uint32(rr.Vin) == outpoint.Index && rr.Txid.IsEqual(&outpoint.Hash) {
+			tx, err := r.GetTransaction(ctx, outpoint.Hash)
+			if err != nil {
+				return nil, err
+			}
+			return &blockchainmodels.UTXO{
+				Txid:   rr.Txid,
+				Index:  uint32(rr.Vin),
+				Status: blockchainmodels.UTXOStatus{},
+				Value:  tx.TxOut[rr.Vin].Value,
+			}, nil
+		}
+	}
+
+	return result, nil
 }
 
-func (r *Rest) GetAddressUTXOs(ctx context.Context, address string) ([]UTXO, error) {
-	var result []UTXO
+func (r *Rest) GetAddressUTXOs(ctx context.Context, address string) ([]blockchainmodels.UTXO, error) {
+	var result []blockchainmodels.UTXO
 	_, err := r.cli.R().
 		SetContext(ctx).
 		SetResult(&result).
@@ -338,15 +353,10 @@ func (r *Rest) GetAddressUTXOs(ctx context.Context, address string) ([]UTXO, err
 }
 
 type TransactionOutSpend struct {
-	Spent  bool           `json:"spent"`
-	Txid   chainhash.Hash `json:"txid"`
-	Vin    int            `json:"vin"`
-	Status struct {
-		Confirmed   bool   `json:"confirmed"`
-		BlockHeight int    `json:"block_height"`
-		BlockHash   string `json:"block_hash"`
-		BlockTime   int    `json:"block_time"`
-	} `json:"status"`
+	Spent  bool                        `json:"spent"`
+	Txid   chainhash.Hash              `json:"txid"`
+	Vin    int                         `json:"vin"`
+	Status blockchainmodels.UTXOStatus `json:"status"`
 }
 
 func (r *Rest) TransactionOutSpends(ctx context.Context, txID chainhash.Hash) ([]TransactionOutSpend, error) {
@@ -368,8 +378,8 @@ type Fee struct {
 	Minimum float64 `json:"minimumFee"`
 }
 
-func (r *Rest) GetFee(ctx context.Context) (*Fee, error) {
-	var result Fee
+func (r *Rest) GetFee(ctx context.Context) (*blockchainmodels.Fee, error) {
+	var result blockchainmodels.Fee
 	_, err := r.cli.R().
 		SetContext(ctx).
 		SetResult(&result).

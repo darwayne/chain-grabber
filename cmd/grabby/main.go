@@ -7,6 +7,8 @@ import (
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/darwayne/chain-grabber/cmd/grabby/internal/passwords"
 	"github.com/darwayne/chain-grabber/internal/core/blockchain/lightnode"
+	"github.com/darwayne/chain-grabber/internal/core/blockchain/mempoolspace"
+	"github.com/darwayne/chain-grabber/internal/core/blockchain/noderpc"
 	"github.com/darwayne/chain-grabber/pkg/broadcaster"
 	"github.com/darwayne/chain-grabber/pkg/keygen"
 	"github.com/darwayne/chain-grabber/pkg/memspender"
@@ -43,19 +45,28 @@ func main() {
 	isMainNet := !*isTestNet
 	var n *lightnode.Node
 	var params *chaincfg.Params
+	var cli memspender.NetworkGrabber
 	if isMainNet {
 		params = &chaincfg.MainNetParams
 		n, err = lightnode.NewMainNet(l)
+		if err == nil {
+			cli, err = noderpc.NewClient(passwords.RPCHost,
+				passwords.RPCUser, passwords.RPCPass)
+		}
 	} else {
 		params = &chaincfg.TestNet3Params
 		n, err = lightnode.NewTestNet(l)
+		if err == nil {
+			cli = mempoolspace.NewRest(mempoolspace.WithNetwork(params))
+		}
 	}
 	if err != nil {
 		panic(err)
 	}
 
 	errChan := make(chan error, 1)
-	spender, err := memspender.New(m.Subscribe(), !isMainNet, getPublisher(!isMainNet, l), *address, l)
+	//mempoolspace.NewRest(mempoolspace.WithNetwork(params))
+	spender, err := memspender.New(m.Subscribe(), !isMainNet, getPublisher(!isMainNet, l), *address, l, cli)
 	if err != nil {
 		panic(err)
 	}

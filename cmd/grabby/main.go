@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"flag"
+	"fmt"
 	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/darwayne/chain-grabber/cmd/grabby/internal/passwords"
 	"github.com/darwayne/chain-grabber/internal/core/blockchain/lightnode"
 	"github.com/darwayne/chain-grabber/internal/core/blockchain/mempoolspace"
@@ -17,6 +19,7 @@ import (
 	"go.uber.org/zap"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 func main() {
@@ -63,6 +66,17 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+
+	fmt.Println("running tx health check")
+	hash, err := chainhash.NewHashFromStr("affab9fcd998c8bcc4621faa76b7dc01fc5ff9c2c4c9c74ba3248880ab20ddb3")
+	if err != nil {
+		panic(err)
+	}
+	start := time.Now()
+	result, err := cli.GetTransaction(context.Background(), *hash)
+	took := time.Since(start)
+	fmt.Println("tx health check completed in", took,
+		"result:", result, "err", err)
 
 	errChan := make(chan error, 1)
 	//mempoolspace.NewRest(mempoolspace.WithNetwork(params))

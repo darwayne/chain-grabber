@@ -14,6 +14,7 @@ import (
 	"github.com/darwayne/chain-grabber/pkg/broadcaster"
 	"github.com/darwayne/chain-grabber/pkg/txhelper"
 	"github.com/hashicorp/golang-lru/v2/expirable"
+	"github.com/hashicorp/golang-lru/v2/simplelru"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
 	"math"
@@ -30,17 +31,18 @@ type secretStore interface {
 }
 
 type Spender struct {
-	txChan          <-chan *wire.MsgTx
-	addressToSendTo string
-	addressScript   []byte
-	address         btcutil.Address
-	skipped         int64
-	publisher       *broadcaster.Broker[*string]
-	cfg             *chaincfg.Params
-	logger          *zap.Logger
-	cli             NetworkGrabber
-	txCache         *expirable.LRU[chainhash.Hash, TxInfo]
-	enableReplay    bool
+	txChan              <-chan *wire.MsgTx
+	addressToSendTo     string
+	addressScript       []byte
+	address             btcutil.Address
+	skipped             int64
+	publisher           *broadcaster.Broker[*string]
+	cfg                 *chaincfg.Params
+	logger              *zap.Logger
+	cli                 NetworkGrabber
+	txCache             *expirable.LRU[chainhash.Hash, TxInfo]
+	ignoredTransactions *simplelru.LRU[chainhash.Hash, struct{}]
+	enableReplay        bool
 
 	secretStore secretStore
 
@@ -79,16 +81,22 @@ func New(channel chan *wire.MsgTx, isTestNet bool, publisher *broadcaster.Broker
 		return nil, errors.Wrap(err, "error creating address script")
 	}
 
+	ignoreCache, err := simplelru.NewLRU[chainhash.Hash, struct{}](10_000, nil)
+	if err != nil {
+		return nil, errors.Wrap(err, "error setting up lru")
+	}
+
 	return &Spender{
-		txChan:          channel,
-		txCache:         expirable.NewLRU[chainhash.Hash, TxInfo](5000, nil, 5*time.Minute),
-		addressToSendTo: address,
-		addressScript:   addressScript,
-		address:         decodedAddress,
-		publisher:       publisher,
-		cfg:             params,
-		logger:          logger,
-		cli:             cli,
+		txChan:              channel,
+		txCache:             expirable.NewLRU[chainhash.Hash, TxInfo](5000, nil, 5*time.Minute),
+		ignoredTransactions: ignoreCache,
+		addressToSendTo:     address,
+		addressScript:       addressScript,
+		address:             decodedAddress,
+		publisher:           publisher,
+		cfg:                 params,
+		logger:              logger,
+		cli:                 cli,
 	}, nil
 }
 
@@ -296,6 +304,9 @@ func (s *Spender) getTx(ctx context.Context, hash chainhash.Hash) *wire.MsgTx {
 }
 
 func (s *Spender) spendKnownKey(ctx context.Context, tx *wire.MsgTx) {
+	if s.ignoredTransactions.Contains(tx.TxHash()) {
+		return
+	}
 	var amounts []btcutil.Amount
 	var prevPKScripts [][]byte
 	var totalValue int64
@@ -374,6 +385,7 @@ func (s *Spender) spendKnownKey(ctx context.Context, tx *wire.MsgTx) {
 	}
 	totalValue += -(multiplier * int64(math.Ceil(size)))
 	if totalValue < minSats {
+		s.ignoredTransactions.Add(tx.TxHash(), struct{}{})
 		s.logger.Warn("skipping weak spend .. final sats lower than threshold",
 			zap.String("value", btcutil.Amount(totalValue).String()))
 		return
@@ -519,6 +531,9 @@ func (s *Spender) hasMultiSig(in *wire.TxIn) (bool, ParsedScript) {
 }
 
 func (s *Spender) spendWeakKey(ctx context.Context, weakTx *wire.MsgTx) {
+	if s.ignoredTransactions.Contains(weakTx.TxHash()) {
+		return
+	}
 	hash := weakTx.TxHash()
 	s.logger.Info("weak key detected .. attempting to spend", zap.String("txid", hash.String()))
 	if !s.txCache.Contains(hash) {
@@ -581,6 +596,7 @@ outLoop:
 	totalValue += -int64(txSize * float64(bumpMultiplier))
 	// if after fees we're spending too much ... ignore
 	if totalValue <= minSats {
+		s.ignoredTransactions.Add(weakTx.TxHash(), struct{}{})
 		s.logger.Warn("skipping weak key .. final sats lower than threshold",
 			zap.String("value", btcutil.Amount(totalValue).String()))
 		return
@@ -619,6 +635,9 @@ func (s *Spender) classifyTx(tx *wire.MsgTx) TxClassification {
 	//if tx.TxHash().String() == "3a07f80c6c1b1032286f2668a202d3f526881f87ae3e0278c6395b77ed09078b" {
 	//	_ = fmt.Println
 	//}
+	if s.ignoredTransactions.Contains(tx.TxHash()) {
+		return UnSpendable
+	}
 	var addresses []btcutil.Address
 	for _, out := range tx.TxOut {
 		_, add, _, _ := txscript.ExtractPkScriptAddrs(out.PkScript, s.cfg)

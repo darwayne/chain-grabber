@@ -387,7 +387,8 @@ func (s *Spender) spendKnownKey(ctx context.Context, tx *wire.MsgTx) {
 	if totalValue < minSats {
 		s.ignoredTransactions.Add(tx.TxHash(), struct{}{})
 		s.logger.Warn("skipping weak spend .. final sats lower than threshold",
-			zap.String("value", btcutil.Amount(totalValue).String()))
+			zap.String("value", btcutil.Amount(totalValue).String()),
+			zap.String("txid", tx.TxHash().String()))
 		return
 	}
 

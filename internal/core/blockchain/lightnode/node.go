@@ -351,7 +351,7 @@ func (n *Node) connectPeer(addr string) (e error) {
 				case data.OnInvoice <- msg:
 				case <-n.ctx.Done():
 				default:
-					n.logger.Warn("warning invoice dropped")
+					//n.logger.Warn("warning invoice dropped")
 				}
 			},
 			OnGetHeaders: func(p *peer.Peer, msg *wire.MsgGetHeaders) {

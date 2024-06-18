@@ -9,12 +9,27 @@ import (
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/darwayne/chain-grabber/internal/core/blockchain/mempoolspace"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
 	"testing"
 )
+
+func TestDev(t *testing.T) {
+	l, err := zap.NewDevelopment(zap.WithCaller(false))
+	require.NoError(t, err)
+	hey(l)
+}
+
+func hey(l *zap.Logger) {
+	there(l)
+}
+
+func there(l *zap.Logger) {
+	l.Warn("yo")
+}
 
 func TestMemFee(t *testing.T) {
 	t.Setenv("PROXY_USER", "")

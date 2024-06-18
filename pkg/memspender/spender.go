@@ -3,7 +3,6 @@ package memspender
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -280,7 +279,7 @@ func (s *Spender) onTx(ctx context.Context, tx *wire.MsgTx) {
 		//s.logger.Info("replacing weak spend")
 		s.spendKnownKey(ctx, tx)
 	case SpentKnownMultiSig:
-		s.logger.Info("weak multisig spend detected", field)
+		//s.logger.Info("weak multisig spend detected", field)
 		s.spendKnownMultiSig(ctx, tx)
 	default:
 		atomic.AddInt64(&s.skipped, 1)
@@ -386,7 +385,7 @@ func (s *Spender) spendKnownKey(ctx context.Context, tx *wire.MsgTx) {
 	totalValue += -(multiplier * int64(math.Ceil(size)))
 	if totalValue < minSats {
 		s.ignoredTransactions.Add(tx.TxHash(), struct{}{})
-		s.logger.Warn("skipping weak spend .. final sats lower than threshold",
+		s.logger.Info("skipping weak spend .. final sats lower than threshold",
 			zap.String("value", btcutil.Amount(totalValue).String()),
 			zap.String("txid", tx.TxHash().String()))
 		return
@@ -590,7 +589,7 @@ outLoop:
 	}
 	txSize, err := s.calcSize(tx, prevPKScripts, amounts)
 	if err != nil {
-		s.logger.Warn("error calculating size", zap.Error(err))
+		s.logger.Info("error calculating size", zap.Error(err))
 		return
 	}
 
@@ -598,7 +597,7 @@ outLoop:
 	// if after fees we're spending too much ... ignore
 	if totalValue <= minSats {
 		s.ignoredTransactions.Add(weakTx.TxHash(), struct{}{})
-		s.logger.Warn("skipping weak key .. final sats lower than threshold",
+		s.logger.Info("skipping weak key .. final sats lower than threshold",
 			zap.String("value", btcutil.Amount(totalValue).String()))
 		return
 	}
@@ -606,7 +605,7 @@ outLoop:
 
 	store := s.secretStore
 	if err := txauthor.AddAllInputScripts(tx, prevPKScripts, amounts, store); err != nil {
-		s.logger.Warn("error signing transaction", zap.String("err", err.Error()))
+		s.logger.Info("error signing transaction", zap.String("err", err.Error()))
 		return
 	}
 
@@ -644,10 +643,6 @@ func (s *Spender) classifyTx(tx *wire.MsgTx) TxClassification {
 		_, add, _, _ := txscript.ExtractPkScriptAddrs(out.PkScript, s.cfg)
 		if len(add) > 0 {
 			for _, address := range add {
-				encoded := address.EncodeAddress()
-				if encoded == "2MuFU6ZyBLtDNadMA6RnwJdXGWUSUaoKLeS" {
-					_ = fmt.Println
-				}
 				if address.EncodeAddress() == s.addressToSendTo {
 					return UnSpendable
 				}
@@ -673,12 +668,18 @@ func (s *Spender) classifyTx(tx *wire.MsgTx) TxClassification {
 		if key != nil {
 			found, _ := s.secretStore.HasKey(key)
 			if found {
+				s.logger.Info("known key detected",
+					zap.String("original_tx_id", tx.TxHash().String()),
+					zap.String("tx_input", in.PreviousOutPoint.String()))
 				return SpentKnownKey
 			}
 			continue
 		}
 
 		if found, _ := hasParsedMultiSigKeys(in, parsed, s.secretStore); found {
+			s.logger.Info("known multisig key detected",
+				zap.String("original_tx_id", tx.TxHash().String()),
+				zap.String("tx_input", in.PreviousOutPoint.String()))
 			return SpentKnownMultiSig
 		}
 
@@ -704,7 +705,7 @@ func (s *Spender) classifyTx(tx *wire.MsgTx) TxClassification {
 			} else {
 				orig, err = s.cli.GetTransaction(context.Background(), outpoint.Hash)
 				if err != nil {
-					s.logger.Warn("error getting transaction info", zap.String("err", err.Error()))
+					s.logger.Info("error getting transaction info", zap.String("err", err.Error()))
 					return UnSpendable
 				}
 				s.txCache.Add(outpoint.Hash, TxInfo{MsgTx: orig})
@@ -712,7 +713,7 @@ func (s *Spender) classifyTx(tx *wire.MsgTx) TxClassification {
 
 			if len(orig.TxOut) <= int(outpoint.Index) {
 				s.txCache.Add(outpoint.Hash, TxInfo{MsgTx: orig, IsBad: true})
-				s.logger.Warn("got bad outpoint .. skipping")
+				s.logger.Info("got bad outpoint .. skipping")
 				return UnSpendable
 			}
 

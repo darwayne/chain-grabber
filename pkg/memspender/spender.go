@@ -189,7 +189,7 @@ func (s *Spender) spendSignedTx(tx *wire.MsgTx) error {
 }
 
 func (s *Spender) Start(ctx context.Context) {
-	t := time.NewTicker(12 * time.Hour)
+	t := time.NewTicker(10 * time.Minute)
 	f, e := s.cli.GetFee(ctx)
 	if e == nil {
 		s.feeMu.Lock()

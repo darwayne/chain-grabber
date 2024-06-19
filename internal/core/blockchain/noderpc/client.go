@@ -3,7 +3,6 @@ package noderpc
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/rpcclient"
@@ -261,7 +260,7 @@ func (c *Client) getMinFee(ctx context.Context) (float64, error) {
 			return 0, info.Err
 		}
 
-		fmt.Println(info.Data.MinFee.String())
+		//fmt.Println(info.Data.MinFee.String())
 
 		fee, _ := info.Data.MinFee.Mul(
 			decimal.NewFromFloat(100_000_000)).Div(

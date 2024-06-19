@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"fmt"
+	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
@@ -27,9 +28,8 @@ type RestOpts struct {
 	HttpClient *http.Client
 	Network    **chaincfg.Params
 }
-type Rest struct {
-	cli *resty.Client
-}
+
+//var _ memspender.NetworkGrabber = (*Rest)(nil)
 
 func NewRest(opts ...RestOptsFunc) *Rest {
 	options := ToRestOpts(opts...)
@@ -103,6 +103,17 @@ func NewRest(opts ...RestOptsFunc) *Rest {
 	res := &Rest{cli: cli}
 	//res.WithTrace().WithDebugging()
 	return res
+}
+
+type Rest struct {
+	cli *resty.Client
+}
+
+func (r *Rest) GetMemPoolEntry(ctx context.Context, hash chainhash.Hash) (*btcjson.GetMempoolEntryResult, error) {
+	return nil, nil
+}
+func (r *Rest) TestMemPoolAccept(ctx context.Context, tx *wire.MsgTx) (*blockchainmodels.AcceptResult, error) {
+	return &blockchainmodels.AcceptResult{Allowed: true}, nil
 }
 
 func (r *Rest) BroadCast(ctx context.Context, tx *wire.MsgTx) error {

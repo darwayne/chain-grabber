@@ -3,6 +3,7 @@ package memspender
 import (
 	"bytes"
 	"context"
+	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -59,6 +60,7 @@ type TxInfo struct {
 }
 
 type NetworkGrabber interface {
+	GetMemPoolEntry(ctx context.Context, hash chainhash.Hash) (*btcjson.GetMempoolEntryResult, error)
 	GetAddressUTXOs(ctx context.Context, address string) ([]blockchainmodels.UTXO, error)
 	GetFee(ctx context.Context) (*blockchainmodels.Fee, error)
 	GetTransaction(ctx context.Context, hash chainhash.Hash) (*wire.MsgTx, error)
@@ -325,6 +327,12 @@ func (s *Spender) spendKnownKey(ctx context.Context, tx *wire.MsgTx) {
 		if outTx == nil || len(outTx.TxOut) < int(in.PreviousOutPoint.Index) {
 			continue
 		}
+
+		//valid, _ := s.cli.GetUTXO(context.Background(), in.PreviousOutPoint)
+		//if valid == nil {
+		//	continue
+		//}
+
 		outpoint := outTx.TxOut[int(in.PreviousOutPoint.Index)]
 		originalInputValue += outpoint.Value
 
@@ -548,11 +556,23 @@ func (s *Spender) spendWeakKey(ctx context.Context, weakTx *wire.MsgTx) {
 	var amounts []btcutil.Amount
 	var outpoints []uint32
 
+	origHash := weakTx.TxHash()
+	memPoolEntry, _ := s.cli.GetMemPoolEntry(ctx, origHash)
+	var inMempool = memPoolEntry != nil
+
 outLoop:
 	for idx, out := range weakTx.TxOut {
 		_, addresses, _, err := txscript.ExtractPkScriptAddrs(out.PkScript, s.cfg)
 		if err != nil {
 			continue
+		}
+
+		point := wire.NewOutPoint(&origHash, uint32(idx))
+		valid, _ := s.cli.GetUTXO(context.Background(), *point)
+		if valid == nil {
+			if !inMempool {
+				continue
+			}
 		}
 
 		for _, addr := range addresses {
@@ -564,6 +584,10 @@ outLoop:
 				continue outLoop
 			}
 		}
+	}
+
+	if len(outpoints) == 0 {
+		return
 	}
 
 	tx := wire.NewMsgTx(wire.TxVersion)

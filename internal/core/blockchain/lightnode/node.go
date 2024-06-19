@@ -44,6 +44,8 @@ type Node struct {
 	Headers            []wire.BlockHeader
 	MaxHeaders         int
 	logger             *zap.Logger
+	lastMessageMu      sync.RWMutex
+	lastMessageSeenAt  time.Time
 }
 
 type PeerData struct {
@@ -124,6 +126,21 @@ func NewNode(logger *zap.Logger, dialer proxy.Dialer, chain *chaincfg.Params) *N
 }
 
 func (n *Node) ConnectV2() {
+	go func() {
+		interval := 10 * time.Minute
+		tick := time.NewTicker(interval)
+		select {
+		case <-tick.C:
+			n.lastMessageMu.RLock()
+			lastMessage := n.lastMessageSeenAt
+			n.lastMessageMu.RUnlock()
+			if lastMessage.Before(time.Now().Add(interval)) {
+				n.logger.Info("no messages seen in " + interval.String() + " .. restarting node connection")
+				go n.ConnectV2()
+				return
+			}
+		}
+	}()
 	connmgr.SeedFromDNS(n.chain,
 		wire.SFNodeNetwork, net.LookupIP, func(addrs []*wire.NetAddressV2) {
 			//log.Println("got", len(addrs), "from dns")
@@ -353,6 +370,10 @@ func (n *Node) connectPeer(addr string) (e error) {
 				default:
 					//n.logger.Warn("warning invoice dropped")
 				}
+
+				n.lastMessageMu.Lock()
+				n.lastMessageSeenAt = time.Now()
+				n.lastMessageMu.Unlock()
 			},
 			OnGetHeaders: func(p *peer.Peer, msg *wire.MsgGetHeaders) {
 				select {

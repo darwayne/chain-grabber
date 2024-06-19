@@ -15,3 +15,8 @@ type UTXOStatus struct {
 	BlockHash   string `json:"block_hash"`
 	BlockTime   int    `json:"block_time"`
 }
+
+type AcceptResult struct {
+	RejectReason string `json:"reject-reason"`
+	Allowed      bool   `json:"allowed"`
+}

@@ -320,6 +320,9 @@ func (n *Node) connectPeer(addr string) (e error) {
 				return nil
 			},
 			OnTx: func(p *peer.Peer, msg *wire.MsgTx) {
+				n.lastMessageMu.Lock()
+				n.lastMessageSeenAt = time.Now()
+				n.lastMessageMu.Unlock()
 				select {
 				case data.OnTX <- msg:
 				default:
@@ -359,6 +362,10 @@ func (n *Node) connectPeer(addr string) (e error) {
 				//		log.Println(inv.Type, inv.Hash, "invoice from", p)
 				//	}
 				//}()
+
+				n.lastMessageMu.Lock()
+				n.lastMessageSeenAt = time.Now()
+				n.lastMessageMu.Unlock()
 				select {
 				case n.OnPeerInv <- PeerInv{Peer: p, MsgInv: msg}:
 				case <-n.ctx.Done():
@@ -371,9 +378,6 @@ func (n *Node) connectPeer(addr string) (e error) {
 					//n.logger.Warn("warning invoice dropped")
 				}
 
-				n.lastMessageMu.Lock()
-				n.lastMessageSeenAt = time.Now()
-				n.lastMessageMu.Unlock()
 			},
 			OnGetHeaders: func(p *peer.Peer, msg *wire.MsgGetHeaders) {
 				select {

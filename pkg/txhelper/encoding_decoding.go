@@ -39,3 +39,12 @@ func FromString(str string) *wire.MsgTx {
 
 	return &tx
 }
+
+func FromBytes(data []byte) *wire.MsgTx {
+	var tx wire.MsgTx
+	if err := tx.Deserialize(bytes.NewReader(data)); err != nil {
+		return nil
+	}
+
+	return &tx
+}

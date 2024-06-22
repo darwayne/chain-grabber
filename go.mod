@@ -16,7 +16,7 @@ require (
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.2.0
 	github.com/fxamacker/cbor v1.5.1
 	github.com/go-resty/resty/v2 v2.11.0
-	github.com/go-zeromq/zmq4 v0.16.0
+	github.com/go-zeromq/zmq4 v0.17.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/mattn/go-sqlite3 v1.14.19
 	github.com/muun/recovery v0.3.1-0.20210419215447-1b60dcf722b6
@@ -29,7 +29,7 @@ require (
 	go.uber.org/multierr v1.10.0
 	go.uber.org/zap v1.27.0
 	golang.org/x/net v0.20.0
-	golang.org/x/sync v0.3.0
+	golang.org/x/sync v0.7.0
 )
 
 require (
@@ -61,7 +61,7 @@ require (
 	golang.org/x/mod v0.8.0 // indirect
 	golang.org/x/sys v0.16.0 // indirect
 	golang.org/x/term v0.16.0 // indirect
-	golang.org/x/text v0.14.0 // indirect
+	golang.org/x/text v0.15.0 // indirect
 	golang.org/x/tools v0.6.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

@@ -134,21 +134,60 @@ func (c *Client) GetUTXO(ctx context.Context, outpoint wire.OutPoint) (*blockcha
 	}, nil
 }
 
-func (c *Client) GetTransaction(ctx context.Context, hash chainhash.Hash) (*wire.MsgTx, error) {
+func (c *Client) GetVerboseTransaction(ctx context.Context, hash chainhash.Hash) (*btcjson.TxRawResult, error) {
 	result := c.cli.GetRawTransactionVerboseAsync(&hash)
 
 	select {
 	case res := <-result:
 		result <- res
-		info, err := result.Receive()
-		if err != nil {
-			return nil, err
-		}
+		return result.Receive()
 
-		return txhelper.FromString(info.Hex), nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+func (c *Client) GetTransaction(ctx context.Context, hash chainhash.Hash) (*wire.MsgTx, error) {
+	result, err := c.GetVerboseTransaction(ctx, hash)
+	if err != nil {
+		return nil, err
+	}
+
+	return txhelper.FromString(result.Hex), nil
+}
+
+func (c *Client) GetBlockHash(ctx context.Context, height int) (*chainhash.Hash, error) {
+	result := c.cli.GetBlockHashAsync(int64(height))
+
+	select {
+	case res := <-result:
+		result <- res
+		return result.Receive()
+
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (c *Client) GetBlock(_ context.Context, hash chainhash.Hash) (*wire.MsgBlock, error) {
+	result := c.cli.GetBlockAsync(&hash)
+
+	return result.Receive()
+}
+
+func (c *Client) GetBlockFromHeight(ctx context.Context, height int) (*wire.MsgBlock, error) {
+	hash, err := c.GetBlockHash(ctx, height)
+	if err != nil {
+		return nil, err
+	}
+
+	return c.GetBlock(ctx, *hash)
+}
+
+func (c *Client) BroadcastTx(_ context.Context, tx *wire.MsgTx) (*chainhash.Hash, error) {
+	result := c.cli.SendRawTransactionAsync(tx, true)
+
+	return result.Receive()
 }
 
 func (c *Client) GetFee(ctx context.Context) (*blockchainmodels.Fee, error) {
